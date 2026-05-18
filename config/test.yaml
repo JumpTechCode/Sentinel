@@ -1,0 +1,2 @@
+log_level: WARNING
+http_port: 8000

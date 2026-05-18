@@ -1,0 +1,7 @@
+# Defaults loaded for env=dev when env vars are absent.
+# Real secrets must come from environment, not from this file.
+kafka_topic_incidents: sentinel.incidents
+log_level: INFO
+http_host: 127.0.0.1
+http_port: 8000
+llm_audit_log_path: logs/llm-audit.log
