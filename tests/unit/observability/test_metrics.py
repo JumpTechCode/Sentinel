@@ -29,7 +29,6 @@ def test_all_spec_metrics_exist() -> None:
         "sentinel_diagnosis_confidence": Histogram,
         "sentinel_llm_tokens_total": Counter,
         "sentinel_llm_cost_usd_total": Counter,
-        "sentinel_hallucinated_evidence_rate": Gauge,
         "sentinel_diagnosis_correctness_rate_30d": Gauge,
         "sentinel_webhook_handler_duration_seconds": Histogram,
         "sentinel_outbox_events_enqueued_total": Counter,

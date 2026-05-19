@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr = Field(..., description="Anthropic API key")
     anthropic_model: str = "claude-sonnet-4-5"
 
+    # Diagnosis agent (Work Area G)
+    diagnosis_consumer_enabled: bool = True
+    diagnosis_prompt_version: str = "v1"
+    diagnosis_max_input_tokens: int = 12_000
+    diagnosis_max_output_tokens: int = 2048
+    diagnosis_llm_timeout_seconds: float = 30.0
+    kafka_consumer_group_diagnoser: str = "sentinel-diagnoser"
+
     # Observability
     log_level: str = "INFO"
     otel_endpoint: str | None = None
