@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from datetime import UTC, datetime
 
 from sentinel.ingestion.kafka_producer import KafkaProducer
 from sentinel.observability.metrics import (
     outbox_event_stuck_total,
     outbox_events_failed_total,
     outbox_events_published_total,
+    outbox_publish_latency_seconds,
 )
 from sentinel.persistence.repositories import OutboxRepository
 
@@ -72,6 +74,9 @@ class OutboxDrainer:
                     )
                     batch.mark_published(event.id)
                     outbox_events_published_total.labels(topic=event.topic).inc()
+                    # Time-in-outbox (created_at → publish): how stale a row was at emit.
+                    latency = (datetime.now(UTC) - event.created_at).total_seconds()
+                    outbox_publish_latency_seconds.labels(topic=event.topic).observe(latency)
                 except Exception as e:
                     batch.mark_failed(event.id, error=repr(e))
                     outbox_events_failed_total.labels(topic=event.topic).inc()

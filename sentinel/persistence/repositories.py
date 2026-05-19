@@ -49,6 +49,7 @@ class OutboxEvent:
     key: str
     payload: dict[str, Any]
     attempts: int
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +97,18 @@ class OutboxRepository(Protocol):
         key: str,
         payload: dict[str, Any],
         session: AsyncSession | None = None,
-    ) -> UUID: ...
+    ) -> UUID:
+        """Insert one outbox row.
+
+        Passing ``session=None`` opens a private transaction and commits it
+        standalone — this path is for backfills and tests only, NOT for
+        production webhook ingestion (it reintroduces the dual-write problem
+        the outbox is meant to solve). Production callers pass the outer
+        transaction's session so the outbox row commits atomically with the
+        domain row that triggered it (see
+        :meth:`IncidentRepository.ingest` for the canonical pattern).
+        """
+        ...
 
     def claim_batch(
         self,
@@ -104,6 +116,16 @@ class OutboxRepository(Protocol):
         limit: int,
         max_attempts: int = 10,
     ) -> AbstractAsyncContextManager[OutboxBatch]: ...
+
+    async def unpublished_stats(self) -> tuple[int, float]:
+        """Return ``(count, oldest_age_seconds)`` for unpublished outbox rows.
+
+        Drives the ``outbox_unpublished_count`` and
+        ``outbox_oldest_unpublished_age_seconds`` gauges. Single aggregate
+        query — cheap enough to poll on a 30s interval against the partial
+        ``idx_outbox_unpublished`` index. Returns ``(0, 0.0)`` when empty.
+        """
+        ...
 
 
 class PostgresOutboxRepository:
@@ -129,6 +151,24 @@ class PostgresOutboxRepository:
             session.add(row)
             await session.flush([row])
             return row.id
+
+    async def unpublished_stats(self) -> tuple[int, float]:
+        # `EXTRACT(EPOCH FROM now() - MIN(created_at))` is NULL when the table is
+        # empty; `COALESCE(..., 0)` handles that path. Single index scan on
+        # `idx_outbox_unpublished`.
+        stmt = select(
+            func.count(OutboxEventModel.id),
+            func.coalesce(
+                func.extract("epoch", func.now() - func.min(OutboxEventModel.created_at)),
+                0,
+            ),
+        ).where(OutboxEventModel.published_at.is_(None))
+        async with self._session_factory() as s:
+            row = (await s.execute(stmt)).first()
+        if row is None:
+            return (0, 0.0)
+        count, age = row
+        return (int(count or 0), float(age or 0.0))
 
     @asynccontextmanager
     async def claim_batch(
@@ -166,6 +206,7 @@ class PostgresOutboxRepository:
                     key=r.key,
                     payload=r.payload,
                     attempts=r.attempts,
+                    created_at=r.created_at,
                 )
                 for r in rows
             ]
@@ -281,6 +322,12 @@ class PostgresIncidentRepository:
             )
             await s.commit()
 
+    # Cap to keep the JSONB column bounded under pathological recurrence
+    # (a noisy alert firing every few seconds for an hour shouldn't grow the
+    # row indefinitely). Truncated count is tracked so observability sees
+    # the drop.
+    _EVENT_LOG_CAP = 100
+
     async def ingest(
         self,
         alert: NormalizedAlert,
@@ -289,12 +336,13 @@ class PostgresIncidentRepository:
         outbox_topic: str,
         payload_hash: str,
     ) -> IngestResult:
-        from datetime import UTC
-        from datetime import datetime as _datetime
-
-        now_iso = _datetime.now(UTC).isoformat()
-
         async with self._session_factory() as s:
+            # Use Postgres server time consistently — `opened_at` defaults to
+            # `now()` and the dedup window query uses `func.now()`. Pulling the
+            # event_log timestamp from the same clock avoids cross-host skew.
+            now = (await s.execute(select(func.now()))).scalar_one()
+            now_iso = now.isoformat()
+
             # 1. Dedup-window lookup — open incidents with the same fingerprint
             #    within the last 1 hour.  FOR UPDATE SKIP LOCKED so concurrent
             #    webhooks for the same fingerprint don't race.
@@ -322,11 +370,17 @@ class PostgresIncidentRepository:
                 occurrence_count = int(sentinel_meta.get("occurrence_count", 1)) + 1
                 event_log: list[dict[str, Any]] = list(sentinel_meta.get("event_log", []))
                 event_log.append(new_event_log_entry)
+                truncated = int(sentinel_meta.get("truncated_entries", 0))
+                if len(event_log) > self._EVENT_LOG_CAP:
+                    drop = len(event_log) - self._EVENT_LOG_CAP
+                    event_log = event_log[drop:]
+                    truncated += drop
                 updated_payload: dict[str, Any] = dict(existing.raw_payload or {})
                 updated_payload["_sentinel"] = {
                     "occurrence_count": occurrence_count,
                     "last_seen_at": now_iso,
                     "event_log": event_log,
+                    "truncated_entries": truncated,
                 }
                 existing.raw_payload = updated_payload
 
@@ -351,6 +405,7 @@ class PostgresIncidentRepository:
                 "occurrence_count": 1,
                 "last_seen_at": now_iso,
                 "event_log": [new_event_log_entry],
+                "truncated_entries": 0,
             }
             merged_payload: dict[str, Any] = dict(alert.raw_payload)
             merged_payload["_sentinel"] = sentinel_meta

@@ -65,3 +65,19 @@ def test_verify_signature_negative_wrong_secret() -> None:
 def test_verify_signature_negative_missing_header() -> None:
     adapter = PagerDutyAdapter()
     assert adapter.verify_signature({}, _body(), SecretStr("secret")) is False
+
+
+def test_verify_signature_accepts_valid_v1_even_when_unknown_tag_present() -> None:
+    """Documents intentional behavior: unknown vN tags are ignored, not rejected.
+
+    Rationale: PagerDuty may add future signature versions; rejecting on
+    unknown tags would silently start dropping legitimate webhooks the day
+    they roll out a `v2=`. Accepting any matching `v1=` and ignoring the
+    rest is forward-compatible. A `vN=`-only header (no v1) still returns
+    False, exercised by `test_verify_signature_rejects_unknown_version_tag`.
+    """
+    adapter = PagerDutyAdapter()
+    body = _body()
+    good = _sig(b"secret", body)
+    headers = {"X-PagerDuty-Signature": f"v1={good},v99={'0' * 64}"}
+    assert adapter.verify_signature(headers, body, SecretStr("secret")) is True
