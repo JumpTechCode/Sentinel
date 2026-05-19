@@ -27,6 +27,7 @@ from sentinel.observability.metrics import (
     diagnosis_llm_tokens_total,
     hallucinated_evidence_total,
     llm_cost_usd_total,
+    llm_tokens_total,
 )
 from sentinel.schemas.api import IncidentDetailResponse
 from sentinel.schemas.context import IncidentContext
@@ -108,6 +109,11 @@ async def diagnose(
     diagnosis_confidence.observe(float(confidence))
     diagnosis_llm_tokens_total.labels(kind="input").inc(last_result.input_tokens)
     diagnosis_llm_tokens_total.labels(kind="output").inc(last_result.output_tokens)
+    # Also increment the general llm_tokens_total{model,kind} for per-model
+    # breakdown — used by Grafana panels that aggregate across non-diagnosis
+    # LLM calls once those exist.
+    llm_tokens_total.labels(model=deps.llm.model, kind="input").inc(last_result.input_tokens)
+    llm_tokens_total.labels(model=deps.llm.model, kind="output").inc(last_result.output_tokens)
     cost = usd_cost(deps.llm.model, last_result.input_tokens, last_result.output_tokens)
     llm_cost_usd_total.labels(model=deps.llm.model).inc(float(cost))
 

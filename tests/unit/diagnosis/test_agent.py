@@ -14,6 +14,10 @@ from sentinel.diagnosis.errors import DiagnosisInvalid, LLMTimeout
 from sentinel.diagnosis.llm_client import LLMResult
 from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.diagnosis.prompt import PromptBundle
+from sentinel.observability.metrics import (
+    diagnosis_llm_tokens_total,
+    llm_tokens_total,
+)
 from sentinel.schemas.api import IncidentDetailResponse
 
 from tests.unit.diagnosis.fakes import make_context, make_deploy
@@ -44,6 +48,48 @@ def _deps(llm: Any) -> DiagnosisDeps:
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_diagnose_increments_per_model_token_counter() -> None:
+    """Both `diagnosis_llm_tokens_total{kind}` and the more general
+    `llm_tokens_total{model,kind}` are incremented on a successful call so
+    Grafana panels broken down by model are not flatlined at zero (#16)."""
+    deploy = make_deploy("abc")
+    ctx = make_context(deploys=[deploy])
+    tool_input = dict(
+        hypothesis="h",
+        confidence=0.7,
+        reasoning="r",
+        evidence=[{"kind": "deploy", "id": "deploy:abc", "note": "n"}],
+        suggested_actions=[],
+        likely_category="deploy",
+    )
+    llm = AsyncMock()
+    llm.model = "claude-sonnet-4-5"
+    llm.diagnose_call.return_value = LLMResult(
+        tool_input=tool_input,
+        input_tokens=100,
+        output_tokens=50,
+        stop_reason="tool_use",
+        latency_ms=123,
+    )
+
+    before_model_in = llm_tokens_total.labels(model=llm.model, kind="input")._value.get()
+    before_model_out = llm_tokens_total.labels(model=llm.model, kind="output")._value.get()
+    before_diag_in = diagnosis_llm_tokens_total.labels(kind="input")._value.get()
+    before_diag_out = diagnosis_llm_tokens_total.labels(kind="output")._value.get()
+
+    await diagnose(_incident(ctx.incident_id), ctx, _deps(llm))
+
+    assert (
+        llm_tokens_total.labels(model=llm.model, kind="input")._value.get() == before_model_in + 100
+    )
+    assert (
+        llm_tokens_total.labels(model=llm.model, kind="output")._value.get()
+        == before_model_out + 50
+    )
+    assert diagnosis_llm_tokens_total.labels(kind="input")._value.get() == before_diag_in + 100
+    assert diagnosis_llm_tokens_total.labels(kind="output")._value.get() == before_diag_out + 50
 
 
 async def test_happy_path_returns_persisted_diagnosis() -> None:
