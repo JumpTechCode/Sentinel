@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from sentinel.enrichment.consumer import EnrichmentConsumer
+from sentinel.enrichment.deps import EnrichmentDeps
+from sentinel.schemas.context import FetcherResult, IncidentContext
 
 
 @dataclass
@@ -69,9 +71,7 @@ class _FakeIncidentRepo:
         return EnrichmentWriteResult(status=self.write_status, version=1)  # type: ignore[arg-type]
 
 
-async def _passthrough_assemble(incident: Any, deps: Any) -> Any:
-    from sentinel.schemas.context import FetcherResult, IncidentContext
-
+async def _passthrough_assemble(incident: Any, deps: EnrichmentDeps) -> IncidentContext:
     empty: FetcherResult[object] = FetcherResult(status="ok", data=[], fetched_at=datetime.now(UTC))
     return IncidentContext(
         incident_id=incident.id,

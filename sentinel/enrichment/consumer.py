@@ -26,13 +26,20 @@ from sentinel.observability.metrics import (
     enrichment_invalid_events_total,
 )
 from sentinel.persistence.repositories import OutboxEvent
+from sentinel.schemas.context import IncidentContext
 from sentinel.schemas.enrichment_event import IncidentEvent
 
 log = logging.getLogger(__name__)
 
 _ACCEPTED_EVENTS = frozenset({"incident.opened", "incident.recurred"})
 
-AssembleFn = Callable[[Any, EnrichmentDeps], Awaitable[Any]]
+# The first parameter stays `Any`: the orchestrator only reads `.id` off the
+# incident, so the consumer/orchestrator pair behaves structurally and a
+# narrower nominal type would force the consumer to depend on the repository's
+# IncidentDetailResponse just for this signature. The return type narrows
+# from `Any` to `IncidentContext` — `sentinel.schemas.context` is a leaf
+# module so this introduces no import cycle with `orchestrator`.
+AssembleFn = Callable[[Any, EnrichmentDeps], Awaitable[IncidentContext]]
 
 
 class EnrichmentConsumer:
