@@ -25,6 +25,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
@@ -72,7 +73,7 @@ class IncidentModel(Base):
         _check_in("source", SOURCE_VALUES),
         _check_in("severity", SEVERITY_VALUES),
         _check_in("status", INCIDENT_STATUS_VALUES),
-        Index("idx_incidents_service_opened", "service", "opened_at"),
+        Index("idx_incidents_service_opened", "service", text("opened_at DESC")),
         Index("idx_incidents_fingerprint", "fingerprint"),
     )
 
@@ -105,7 +106,7 @@ class DiagnosisModel(Base):
     __table_args__ = (
         CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_diagnoses_confidence_unit"),
         _check_in("likely_category", CATEGORY_VALUES),
-        Index("idx_diagnoses_incident", "incident_id", "created_at"),
+        Index("idx_diagnoses_incident", "incident_id", text("created_at DESC")),
     )
 
 
@@ -149,7 +150,7 @@ class DeployModel(Base):
     deployed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     deployed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    __table_args__ = (Index("idx_deploys_service_time", "service", "deployed_at"),)
+    __table_args__ = (Index("idx_deploys_service_time", "service", text("deployed_at DESC")),)
 
 
 class RunbookModel(Base):
