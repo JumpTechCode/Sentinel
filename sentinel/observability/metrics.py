@@ -104,6 +104,12 @@ diagnoses_total = _safe_counter(
 )
 diagnosis_failures_total = _safe_counter(
     "sentinel_diagnosis_failures_total",
+    # reason ∈ {schema, timeout, transport, no_tool_call,
+    # missing_context, missing_incident, exception}.
+    # `exception` is the outer catch-all in DiagnosisConsumer.run for any
+    # error not caught by a named branch (repository / outbox failures,
+    # unexpected errors from the agent, etc.). When a recurring failure
+    # surfaces with reason=exception, decompose it into a named branch.
     "Diagnosis attempts that failed before persistence",
     ["reason"],
 )

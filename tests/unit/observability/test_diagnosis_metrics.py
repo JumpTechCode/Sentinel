@@ -35,6 +35,10 @@ def test_diagnoses_total_has_status_label() -> None:
 def test_diagnosis_failures_total_has_reason_label() -> None:
     from sentinel.observability.metrics import diagnosis_failures_total
 
+    # The full documented label set per the design doc §6:
+    # schema | timeout | transport | no_tool_call | missing_context |
+    # missing_incident | exception. `exception` is the outer catch-all in
+    # DiagnosisConsumer.run for errors not caught by a named branch.
     for reason in (
         "schema",
         "timeout",
@@ -42,6 +46,7 @@ def test_diagnosis_failures_total_has_reason_label() -> None:
         "no_tool_call",
         "missing_context",
         "missing_incident",
+        "exception",
     ):
         diagnosis_failures_total.labels(reason=reason).inc(0)
 
