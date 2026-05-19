@@ -2,7 +2,7 @@
 
 Sentinel is an AI on-call copilot: it ingests production alerts, assembles incident context in parallel from your existing tooling, and produces an evidence-cited diagnosis with confidence — single-shot, deterministic, schema-validated. It learns from resolutions via a pgvector incident memory.
 
-This repo is scaffolding for a portfolio-grade production system; see `docs/plans/` for the implementation roadmap.
+This repo is scaffolding for a portfolio-grade production system; see `plans/` for the implementation roadmap.
 
 ## Local development
 
