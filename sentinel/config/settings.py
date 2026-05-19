@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     redis_url: str = Field(..., description="redis://host:port/db")
     kafka_brokers: str = Field(..., description="comma-separated host:port list")
     kafka_topic_incidents: str = "sentinel.incidents"
+    kafka_consumer_group_enricher: str = "sentinel-enricher"
 
     # LLM
     anthropic_api_key: SecretStr = Field(..., description="Anthropic API key")

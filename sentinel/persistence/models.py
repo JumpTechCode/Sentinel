@@ -67,6 +67,14 @@ class IncidentModel(Base):
     )
     resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    context_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    context_assembled_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    context_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_enrichment_event_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
 
     __table_args__ = (
         UniqueConstraint("source", "external_id", name="uq_incidents_source_external"),
@@ -75,6 +83,11 @@ class IncidentModel(Base):
         _check_in("status", INCIDENT_STATUS_VALUES),
         Index("idx_incidents_service_opened", "service", text("opened_at DESC")),
         Index("idx_incidents_fingerprint", "fingerprint"),
+        Index(
+            "ix_incidents_last_enrichment_event_id",
+            "last_enrichment_event_id",
+            postgresql_where=text("last_enrichment_event_id IS NOT NULL"),
+        ),
     )
 
 

@@ -34,8 +34,18 @@ class KafkaProducer:
             await self._producer.stop()
             self._producer = None
 
-    async def emit(self, *, topic: str, key: str, payload: dict[str, Any]) -> None:
+    async def emit(
+        self,
+        *,
+        topic: str,
+        key: str,
+        payload: dict[str, Any],
+        headers: list[tuple[str, bytes]] | None = None,
+    ) -> None:
         if self._producer is None:
             raise RuntimeError("KafkaProducer.start() must be awaited before emit()")
         value = json.dumps(payload).encode()
-        await self._producer.send_and_wait(topic, value=value, key=key.encode())
+        kwargs: dict[str, Any] = {"value": value, "key": key.encode()}
+        if headers is not None:
+            kwargs["headers"] = headers
+        await self._producer.send_and_wait(topic, **kwargs)

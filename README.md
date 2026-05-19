@@ -30,3 +30,9 @@ make test-integration   # integration tests (needs docker)
 
 CI runs `lint`, `typecheck`, unit tests, integration tests, and `evals-smoke` on
 every PR; a nightly workflow runs the full eval corpus.
+
+## Support
+
+If you find this project useful, you can support its development:
+
+<a href="https://buymeacoffee.com/JumpTech"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="200"></a>

@@ -140,6 +140,36 @@ outbox_event_stuck_total = _safe_counter(
     "Outbox rows skipped because attempts >= max_attempts.",
     [],
 )
+enrichment_assemble_duration_seconds = _safe_histogram(
+    "sentinel_enrichment_assemble_duration_seconds",
+    "End-to-end assemble() duration in seconds.",
+    [],
+)
+enrichment_section_status_total = _safe_counter(
+    "sentinel_enrichment_section_status_total",
+    "Per-fetcher section status outcomes.",
+    ["fetcher", "status"],
+)
+enrichment_events_consumed_total = _safe_counter(
+    "sentinel_enrichment_events_consumed_total",
+    "Kafka events the enricher consumed.",
+    ["type"],
+)
+enrichment_events_failed_total = _safe_counter(
+    "sentinel_enrichment_events_failed_total",
+    "Kafka events the enricher could not process.",
+    ["reason"],
+)
+enrichment_duplicates_total = _safe_counter(
+    "sentinel_enrichment_duplicates_total",
+    "Re-delivered events that the enricher idempotently ignored.",
+    [],
+)
+enrichment_invalid_events_total = _safe_counter(
+    "sentinel_enrichment_invalid_events_total",
+    "Events the enricher rejected as malformed (poison-pill committed).",
+    [],
+)
 
 _NAME_TO_ATTR: dict[str, str] = {
     "sentinel_webhooks_total": "webhooks_total",
@@ -161,6 +191,12 @@ _NAME_TO_ATTR: dict[str, str] = {
     "sentinel_outbox_unpublished_count": "outbox_unpublished_count",
     "sentinel_outbox_oldest_unpublished_age_seconds": "outbox_oldest_unpublished_age_seconds",
     "sentinel_outbox_event_stuck_total": "outbox_event_stuck_total",
+    "sentinel_enrichment_assemble_duration_seconds": "enrichment_assemble_duration_seconds",
+    "sentinel_enrichment_section_status_total": "enrichment_section_status_total",
+    "sentinel_enrichment_events_consumed_total": "enrichment_events_consumed_total",
+    "sentinel_enrichment_events_failed_total": "enrichment_events_failed_total",
+    "sentinel_enrichment_duplicates_total": "enrichment_duplicates_total",
+    "sentinel_enrichment_invalid_events_total": "enrichment_invalid_events_total",
 }
 
 

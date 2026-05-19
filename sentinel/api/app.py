@@ -8,6 +8,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from aiokafka import AIOKafkaConsumer
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
@@ -15,12 +16,27 @@ from sentinel import __version__
 from sentinel.api.routes.health import router as health_router
 from sentinel.api.routes.webhooks import router as webhooks_router
 from sentinel.config.settings import load_settings
+from sentinel.enrichment import (
+    EnrichmentDeps,
+    assemble,
+    default_fetchers,
+    make_breaker,
+)
+from sentinel.enrichment.consumer import EnrichmentConsumer
+from sentinel.enrichment.defaults import (
+    NotConfiguredActiveAlerts,
+    NotConfiguredLogSearch,
+    NotConfiguredRunbookRetrieval,
+    NotConfiguredSimilarIncidents,
+)
 from sentinel.ingestion.idempotency import RedisIdempotencyStore
 from sentinel.ingestion.kafka_producer import KafkaProducer
 from sentinel.ingestion.outbox_drainer import OutboxDrainer
 from sentinel.ingestion.webhook import WebhookHandler
+from sentinel.observability.tracing import configure_tracing
 from sentinel.persistence.repositories import (
     OutboxRepository,
+    PostgresDeployRepository,
     PostgresIncidentRepository,
     PostgresOutboxRepository,
 )
@@ -32,6 +48,7 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = load_settings()
+    configure_tracing(settings)
 
     engine = make_async_engine(settings)
     session_factory = make_session_factory(engine)
@@ -46,6 +63,44 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     drainer = OutboxDrainer(outbox_repo=outbox_repo, producer=producer)
     drainer_task = asyncio.create_task(drainer.run(), name="outbox-drainer")
     gauge_task = asyncio.create_task(_refresh_outbox_gauges(outbox_repo), name="outbox-gauges")
+
+    # ---- Enrichment ----------------------------------------------------
+    # Unconditional startup (matches Phase 3 drainer pattern). The consumer
+    # depends on `incident_repo` constructed above; placing it after the
+    # drainer keeps shutdown ordering simple (enricher first, drainer second).
+    deploy_repo = PostgresDeployRepository(session_factory)
+
+    fetchers = default_fetchers()
+    breakers = {f.name: make_breaker(f.name) for f in fetchers}
+
+    enrich_deps = EnrichmentDeps(
+        fetchers=fetchers,
+        breakers=breakers,
+        incident_repo=incident_repo,
+        deploy_repo=deploy_repo,
+        similar_incidents=NotConfiguredSimilarIncidents(),
+        runbooks=NotConfiguredRunbookRetrieval(),
+        log_search=NotConfiguredLogSearch(),
+        active_alerts=NotConfiguredActiveAlerts(),
+    )
+
+    kafka_consumer = AIOKafkaConsumer(
+        settings.kafka_topic_incidents,
+        bootstrap_servers=settings.kafka_brokers,
+        group_id=settings.kafka_consumer_group_enricher,
+        enable_auto_commit=False,
+        auto_offset_reset="earliest",
+    )
+    await kafka_consumer.start()
+    enricher = EnrichmentConsumer(
+        consumer=kafka_consumer,
+        deps=enrich_deps,
+        assemble_fn=assemble,
+        topic=settings.kafka_topic_incidents,
+        enriched_topic=settings.kafka_topic_incidents,
+    )
+    enricher_task = asyncio.create_task(enricher.run(), name="enrichment-consumer")
+    app.state.enrichment_consumer = enricher
 
     handler = WebhookHandler(
         incident_repo=incident_repo,
@@ -63,10 +118,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        # Shutdown sequence: drainer first (so it stops claiming new rows),
-        # then producer/redis/engine in parallel via gather. We collect
-        # exceptions so a failure in one cleanup doesn't mask the others —
-        # graceful shutdown means *all* resources get a chance to release.
+        # Shutdown sequence: enricher first (consumes from Kafka, may write
+        # outbox rows via the incident repo), then drainer (so it stops
+        # claiming new rows), then producer/redis/engine in parallel via
+        # gather. We collect exceptions so a failure in one cleanup doesn't
+        # mask the others — graceful shutdown means *all* resources get a
+        # chance to release.
+        enricher.stop()
+        try:
+            await asyncio.wait_for(enricher_task, timeout=5.0)
+        except TimeoutError:
+            enricher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await enricher_task
+        with contextlib.suppress(Exception):
+            await kafka_consumer.stop()
+
         drainer.stop()
         gauge_task.cancel()
         try:
