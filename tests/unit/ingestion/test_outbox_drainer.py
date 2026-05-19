@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -11,6 +12,10 @@ import pytest
 from sentinel.ingestion.outbox_drainer import OutboxDrainer
 from sentinel.persistence.repositories import OutboxEvent
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 class _FakeBatch:
@@ -41,6 +46,9 @@ class _FakeRepo:
     ) -> UUID:
         raise NotImplementedError("not used in drainer tests")
 
+    async def unpublished_stats(self) -> tuple[int, float]:
+        return (len(self._events), 0.0)
+
     def claim_batch(self, *, limit: int, max_attempts: int = 10) -> Any:
         events = self._events
         repo = self
@@ -57,7 +65,8 @@ class _FakeRepo:
 @pytest.mark.asyncio
 async def test_drainer_publishes_each_event() -> None:
     events = [
-        OutboxEvent(id=uuid4(), topic="t", key="k", payload={"i": i}, attempts=0) for i in range(3)
+        OutboxEvent(id=uuid4(), topic="t", key="k", payload={"i": i}, attempts=0, created_at=_now())
+        for i in range(3)
     ]
     repo = _FakeRepo(events)
     producer = MagicMock()
@@ -72,7 +81,9 @@ async def test_drainer_publishes_each_event() -> None:
 
 @pytest.mark.asyncio
 async def test_drainer_marks_failed_on_emit_error() -> None:
-    events = [OutboxEvent(id=uuid4(), topic="t", key="k", payload={}, attempts=0)]
+    events = [
+        OutboxEvent(id=uuid4(), topic="t", key="k", payload={}, attempts=0, created_at=_now())
+    ]
     repo = _FakeRepo(events)
     producer = MagicMock()
     producer.emit = AsyncMock(side_effect=RuntimeError("kafka down"))
@@ -86,7 +97,9 @@ async def test_drainer_marks_failed_on_emit_error() -> None:
 
 @pytest.mark.asyncio
 async def test_drainer_skips_stuck_events() -> None:
-    events = [OutboxEvent(id=uuid4(), topic="t", key="k", payload={}, attempts=10)]
+    events = [
+        OutboxEvent(id=uuid4(), topic="t", key="k", payload={}, attempts=10, created_at=_now())
+    ]
     repo = _FakeRepo(events)
     producer = MagicMock()
     producer.emit = AsyncMock()

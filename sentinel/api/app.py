@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -18,10 +20,13 @@ from sentinel.ingestion.kafka_producer import KafkaProducer
 from sentinel.ingestion.outbox_drainer import OutboxDrainer
 from sentinel.ingestion.webhook import WebhookHandler
 from sentinel.persistence.repositories import (
+    OutboxRepository,
     PostgresIncidentRepository,
     PostgresOutboxRepository,
 )
 from sentinel.persistence.session import make_async_engine, make_session_factory
+
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -40,6 +45,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await producer.start()
     drainer = OutboxDrainer(outbox_repo=outbox_repo, producer=producer)
     drainer_task = asyncio.create_task(drainer.run(), name="outbox-drainer")
+    gauge_task = asyncio.create_task(_refresh_outbox_gauges(outbox_repo), name="outbox-gauges")
 
     handler = WebhookHandler(
         incident_repo=incident_repo,
@@ -57,14 +63,56 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Shutdown sequence: drainer first (so it stops claiming new rows),
+        # then producer/redis/engine in parallel via gather. We collect
+        # exceptions so a failure in one cleanup doesn't mask the others —
+        # graceful shutdown means *all* resources get a chance to release.
         drainer.stop()
+        gauge_task.cancel()
         try:
             await asyncio.wait_for(drainer_task, timeout=5.0)
         except TimeoutError:
             drainer_task.cancel()
-        await producer.stop()
-        await redis.aclose()
-        await engine.dispose()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drainer_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await gauge_task
+
+        results = await asyncio.gather(
+            producer.stop(),
+            redis.aclose(),
+            engine.dispose(),
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, BaseException):
+                log.exception("lifespan_shutdown_cleanup_failed", exc_info=r)
+
+
+async def _refresh_outbox_gauges(outbox_repo: OutboxRepository, interval: float = 30.0) -> None:
+    """Periodically populate outbox monitoring gauges from a cheap aggregate query.
+
+    `outbox_unpublished_count` and `outbox_oldest_unpublished_age_seconds`
+    would otherwise be declared-but-never-set, which is worse than missing —
+    dashboards built on them would render valid-looking zero series. The
+    repository's `unpublished_stats()` issues a single aggregate query against
+    the partial `idx_outbox_unpublished` index.
+    """
+    from sentinel.observability.metrics import (
+        outbox_oldest_unpublished_age_seconds,
+        outbox_unpublished_count,
+    )
+
+    while True:
+        try:
+            count, age_seconds = await outbox_repo.unpublished_stats()
+            outbox_unpublished_count.set(float(count))
+            outbox_oldest_unpublished_age_seconds.set(float(age_seconds))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("outbox_gauge_refresh_failed")
+        await asyncio.sleep(interval)
 
 
 def build_app() -> FastAPI:
