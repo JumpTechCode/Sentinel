@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sentinel.api.app import build_app
+from sentinel.api.app import _refresh_outbox_gauges, build_app
+from sentinel.observability import metrics as M
 
 
 @pytest.mark.asyncio
@@ -84,3 +86,25 @@ async def test_lifespan_starts_and_stops_producer_and_drainer(
         diag_consumer_instance.start.assert_awaited_once()
         diag_consumer_instance.stop.assert_awaited_once()
         diagnoser_instance.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_outbox_gauges_sets_stuck_count_gauge() -> None:
+    repo = MagicMock()
+    repo.unpublished_stats = AsyncMock(return_value=(5, 1.5))
+    repo.stuck_count = AsyncMock(return_value=3)
+
+    task = asyncio.create_task(_refresh_outbox_gauges(repo, interval=3600.0, max_attempts=7))
+    # Yield long enough for the first iteration to run, then cancel.
+    for _ in range(50):
+        if repo.stuck_count.await_count >= 1:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    repo.stuck_count.assert_awaited_with(max_attempts=7)
+    assert M.outbox_stuck_events_count._value.get() == 3.0
+    assert M.outbox_unpublished_count._value.get() == 5.0
+    assert M.outbox_oldest_unpublished_age_seconds._value.get() == 1.5

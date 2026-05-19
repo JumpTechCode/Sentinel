@@ -36,7 +36,7 @@ from sentinel.enrichment.defaults import (
 )
 from sentinel.ingestion.idempotency import RedisIdempotencyStore
 from sentinel.ingestion.kafka_producer import KafkaProducer
-from sentinel.ingestion.outbox_drainer import OutboxDrainer
+from sentinel.ingestion.outbox_drainer import OUTBOX_MAX_ATTEMPTS, OutboxDrainer
 from sentinel.ingestion.webhook import WebhookHandler
 from sentinel.observability.llm_audit import LLMAuditLogger
 from sentinel.observability.tracing import configure_tracing
@@ -219,25 +219,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 log.exception("lifespan_shutdown_cleanup_failed", exc_info=r)
 
 
-async def _refresh_outbox_gauges(outbox_repo: OutboxRepository, interval: float = 30.0) -> None:
-    """Periodically populate outbox monitoring gauges from a cheap aggregate query.
+async def _refresh_outbox_gauges(
+    outbox_repo: OutboxRepository,
+    interval: float = 30.0,
+    max_attempts: int = OUTBOX_MAX_ATTEMPTS,
+) -> None:
+    """Periodically populate outbox monitoring gauges from cheap aggregate queries.
 
-    `outbox_unpublished_count` and `outbox_oldest_unpublished_age_seconds`
-    would otherwise be declared-but-never-set, which is worse than missing —
-    dashboards built on them would render valid-looking zero series. The
-    repository's `unpublished_stats()` issues a single aggregate query against
-    the partial `idx_outbox_unpublished` index.
+    `outbox_unpublished_count`, `outbox_oldest_unpublished_age_seconds`, and
+    `outbox_stuck_events_count` would otherwise be declared-but-never-set,
+    which is worse than missing — dashboards built on them would render
+    valid-looking zero series. `unpublished_stats()` and `stuck_count()`
+    each issue a single aggregate query against the partial
+    `idx_outbox_unpublished` index.
     """
     from sentinel.observability.metrics import (
         outbox_oldest_unpublished_age_seconds,
+        outbox_stuck_events_count,
         outbox_unpublished_count,
     )
 
     while True:
         try:
             count, age_seconds = await outbox_repo.unpublished_stats()
+            stuck = await outbox_repo.stuck_count(max_attempts=max_attempts)
             outbox_unpublished_count.set(float(count))
             outbox_oldest_unpublished_age_seconds.set(float(age_seconds))
+            outbox_stuck_events_count.set(float(stuck))
         except asyncio.CancelledError:
             raise
         except Exception:

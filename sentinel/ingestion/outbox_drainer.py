@@ -16,7 +16,6 @@ from opentelemetry import propagate
 
 from sentinel.ingestion.kafka_producer import KafkaProducer
 from sentinel.observability.metrics import (
-    outbox_event_stuck_total,
     outbox_events_failed_total,
     outbox_events_published_total,
     outbox_publish_latency_seconds,
@@ -24,6 +23,10 @@ from sentinel.observability.metrics import (
 from sentinel.persistence.repositories import OutboxRepository
 
 log = logging.getLogger(__name__)
+
+# Shared with the outbox gauge refresher (sentinel.api.app._refresh_outbox_gauges)
+# so the stuck-events gauge counts the same rows the drainer would skip.
+OUTBOX_MAX_ATTEMPTS = 10
 
 
 class OutboxDrainer:
@@ -35,7 +38,7 @@ class OutboxDrainer:
         poll_interval: float = 0.25,
         batch_size: int = 100,
         emit_timeout: float = 5.0,
-        max_attempts: int = 10,
+        max_attempts: int = OUTBOX_MAX_ATTEMPTS,
     ) -> None:
         self._repo = outbox_repo
         self._producer = producer
@@ -63,7 +66,9 @@ class OutboxDrainer:
         ) as batch:
             for event in batch.events:
                 if event.attempts >= self._max_attempts:
-                    outbox_event_stuck_total.inc()
+                    # Counted via the outbox_stuck_events_count gauge populated
+                    # by sentinel.api.app._refresh_outbox_gauges — a counter
+                    # here would inflate by 1 per tick per stuck row.
                     continue
                 carrier: dict[str, str] = {}
                 propagate.inject(carrier)

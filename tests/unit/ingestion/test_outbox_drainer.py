@@ -49,6 +49,9 @@ class _FakeRepo:
     async def unpublished_stats(self) -> tuple[int, float]:
         return (len(self._events), 0.0)
 
+    async def stuck_count(self, *, max_attempts: int) -> int:
+        return sum(1 for e in self._events if e.attempts >= max_attempts)
+
     def claim_batch(self, *, limit: int, max_attempts: int = 10) -> Any:
         events = self._events
         repo = self
