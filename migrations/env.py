@@ -3,12 +3,14 @@
 Work Area B will register the metadata target (SQLAlchemy declarative Base).
 Work Area A only proves the runner boots and connects.
 """
+
 from __future__ import annotations
 
 import asyncio
 from logging.config import fileConfig
 
 from alembic import context
+from sentinel.persistence.dsn_resolution import choose_dsn
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -23,19 +25,12 @@ target_metadata = None
 
 
 def _resolve_dsn() -> str:
-    """Resolve the Postgres DSN lazily so alembic CLI works without env vars set."""
-    try:
+    def _load_from_settings() -> str:
         from sentinel.config.settings import load_settings
 
         return load_settings().postgres_dsn
-    except Exception:
-        url = config.get_main_option("sqlalchemy.url")
-        if not url:
-            raise RuntimeError(
-                "alembic could not resolve a Postgres DSN — set SENTINEL_POSTGRES_DSN "
-                "or [alembic] sqlalchemy.url"
-            )
-        return url
+
+    return choose_dsn(config.get_main_option("sqlalchemy.url"), _load_from_settings)
 
 
 def run_migrations_offline() -> None:
