@@ -8,11 +8,13 @@ Pydantic schemas where they cross a module boundary.
 
 from __future__ import annotations
 
+import json
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import func, select, text, update
@@ -25,7 +27,9 @@ from sentinel.persistence.models import (
 )
 from sentinel.schemas.alert import NormalizedAlert
 from sentinel.schemas.api import IncidentDetailResponse, IncidentListItem, ResolveIncidentRequest
+from sentinel.schemas.context import DeployItem, IncidentContext, RelatedAlertItem
 from sentinel.schemas.diagnosis import Diagnosis
+from sentinel.schemas.enums import SeverityType
 
 # --- Read DTOs -------------------------------------------------------------- #
 
@@ -63,6 +67,31 @@ class IngestResult:
 
     incident_id: UUID
     event_kind: Literal["opened", "recurred"]
+
+
+@dataclass(frozen=True, slots=True)
+class EnrichmentWriteResult:
+    """Returned by :meth:`IncidentRepository.write_enrichment_context`.
+
+    ``status`` is ``"written"`` when the conditional UPDATE applied,
+    ``"duplicate"`` when ``event_id`` matched ``last_enrichment_event_id``
+    and the write was a no-op. ``version`` is the post-write
+    ``context_version`` on a successful write, or the unchanged existing
+    version on a duplicate.
+    """
+
+    status: Literal["written", "duplicate"]
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
+class StoredEnrichmentContext:
+    """Read-back of the persisted enrichment context for an incident."""
+
+    context: IncidentContext
+    assembled_at: datetime
+    version: int
+    last_event_id: UUID
 
 
 class OutboxBatch:
@@ -257,6 +286,29 @@ class IncidentRepository(Protocol):
         payload_hash: str,
     ) -> IngestResult: ...
 
+    async def write_enrichment_context(
+        self,
+        *,
+        incident_id: UUID,
+        event_id: UUID,
+        context: IncidentContext,
+        assembled_at: datetime,
+        outbox_event: OutboxEvent | None = None,
+    ) -> EnrichmentWriteResult: ...
+
+    async def get_enrichment_context(
+        self,
+        incident_id: UUID,
+    ) -> StoredEnrichmentContext | None: ...
+
+    async def recent_for_service(
+        self,
+        *,
+        service: str,
+        since: datetime,
+        exclude_incident_id: UUID,
+    ) -> list[RelatedAlertItem]: ...
+
 
 class PostgresIncidentRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -384,10 +436,13 @@ class PostgresIncidentRepository:
                 }
                 existing.raw_payload = updated_payload
 
+                outbox_id = uuid.uuid4()
                 outbox_row = OutboxEventModel(
+                    id=outbox_id,
                     topic=outbox_topic,
                     key=str(existing.id),
                     payload={
+                        "event_id": str(outbox_id),
                         "event": "incident.recurred",
                         "incident_id": str(existing.id),
                         "fingerprint": fingerprint,
@@ -423,10 +478,13 @@ class PostgresIncidentRepository:
             await s.flush([new_incident])
 
             # 4. In the same tx: insert outbox row for the Kafka producer.
+            outbox_id = uuid.uuid4()
             outbox_row = OutboxEventModel(
+                id=outbox_id,
                 topic=outbox_topic,
                 key=str(new_incident.id),
                 payload={
+                    "event_id": str(outbox_id),
                     "event": "incident.opened",
                     "incident_id": str(new_incident.id),
                     "fingerprint": fingerprint,
@@ -437,6 +495,137 @@ class PostgresIncidentRepository:
             s.add(outbox_row)
             await s.commit()
             return IngestResult(incident_id=new_incident.id, event_kind="opened")
+
+    async def write_enrichment_context(
+        self,
+        *,
+        incident_id: UUID,
+        event_id: UUID,
+        context: IncidentContext,
+        assembled_at: datetime,
+        outbox_event: OutboxEvent | None = None,
+    ) -> EnrichmentWriteResult:
+        """Idempotently persist enrichment context for an incident.
+
+        The conditional ``WHERE last_enrichment_event_id IS DISTINCT FROM
+        :event_id`` makes a re-delivery of the same enrichment event a no-op:
+        Postgres returns zero rows from ``RETURNING`` and we report
+        ``duplicate`` without mutating anything. The optional ``outbox_event``
+        is INSERTed in the same session so the domain write and the
+        downstream-event publish commit atomically.
+        """
+        ctx_json = context.model_dump(mode="json")
+        async with self._session_factory() as s:
+            result = await s.execute(
+                text(
+                    "UPDATE incidents "
+                    "SET context_json = CAST(:ctx AS jsonb), "
+                    "    context_assembled_at = :assembled_at, "
+                    "    context_version = context_version + 1, "
+                    "    last_enrichment_event_id = :event_id "
+                    "WHERE id = :incident_id "
+                    "  AND (last_enrichment_event_id IS DISTINCT FROM :event_id) "
+                    "RETURNING context_version"
+                ),
+                {
+                    "ctx": json.dumps(ctx_json),
+                    "assembled_at": assembled_at,
+                    "event_id": event_id,
+                    "incident_id": incident_id,
+                },
+            )
+            row = result.first()
+            if row is None:
+                # Either the incident does not exist, or the event_id matched
+                # the last-applied one — duplicate delivery. Roll back the
+                # implicit tx and read back the current version for the caller.
+                await s.rollback()
+                existing = await s.execute(
+                    text("SELECT context_version FROM incidents WHERE id = :id"),
+                    {"id": incident_id},
+                )
+                existing_row = existing.first()
+                version = int(existing_row[0]) if existing_row is not None else 0
+                return EnrichmentWriteResult(status="duplicate", version=version)
+
+            new_version = int(row[0])
+            if outbox_event is not None:
+                s.add(
+                    OutboxEventModel(
+                        id=outbox_event.id,
+                        topic=outbox_event.topic,
+                        key=outbox_event.key,
+                        payload=outbox_event.payload,
+                    )
+                )
+            await s.commit()
+            return EnrichmentWriteResult(status="written", version=new_version)
+
+    async def get_enrichment_context(
+        self,
+        incident_id: UUID,
+    ) -> StoredEnrichmentContext | None:
+        async with self._session_factory() as s:
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT context_json, context_assembled_at, "
+                        "       context_version, last_enrichment_event_id "
+                        "FROM incidents WHERE id = :id"
+                    ),
+                    {"id": incident_id},
+                )
+            ).first()
+        if row is None:
+            return None
+        ctx_json, assembled_at, version, last_event_id = row
+        if ctx_json is None or last_event_id is None:
+            return None
+        return StoredEnrichmentContext(
+            context=IncidentContext.model_validate(ctx_json),
+            assembled_at=assembled_at,
+            version=int(version),
+            last_event_id=last_event_id,
+        )
+
+    async def recent_for_service(
+        self,
+        *,
+        service: str,
+        since: datetime,
+        exclude_incident_id: UUID,
+    ) -> list[RelatedAlertItem]:
+        from sentinel.schemas.ids import related_id
+
+        async with self._session_factory() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(IncidentModel)
+                        .where(
+                            IncidentModel.service == service,
+                            IncidentModel.opened_at >= since,
+                            IncidentModel.id != exclude_incident_id,
+                        )
+                        .order_by(IncidentModel.opened_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                RelatedAlertItem(
+                    id=related_id(row.id),
+                    service=row.service,
+                    # severity is constrained at the DB level to SEVERITY_VALUES
+                    # (CHECK constraint); narrow the str -> SeverityType for the
+                    # Pydantic Literal-typed field.
+                    severity=cast(SeverityType, row.severity),
+                    title=row.title,
+                    opened_at=row.opened_at,
+                )
+                for row in rows
+            ]
 
 
 # --- Deploy repository ------------------------------------------------------ #
@@ -456,6 +645,13 @@ class DeployRepository(Protocol):
     ) -> UUID: ...
 
     async def recent_for_service(self, service: str, *, limit: int = 20) -> list[DeployRow]: ...
+
+    async def recent_for_service_window(
+        self,
+        *,
+        service: str,
+        since: datetime,
+    ) -> list[DeployItem]: ...
 
 
 class PostgresDeployRepository:
@@ -508,6 +704,40 @@ class PostgresDeployRepository:
                 for row in result.scalars()
             ]
 
+    async def recent_for_service_window(
+        self,
+        *,
+        service: str,
+        since: datetime,
+    ) -> list[DeployItem]:
+        from sentinel.schemas.ids import deploy_id
+
+        async with self._session_factory() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(DeployModel)
+                        .where(DeployModel.service == service, DeployModel.deployed_at >= since)
+                        .order_by(DeployModel.deployed_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                DeployItem(
+                    id=deploy_id(row.sha),
+                    service=row.service,
+                    sha=row.sha,
+                    pr_number=row.pr_number,
+                    pr_title=row.pr_title,
+                    pr_diff_summary=row.pr_diff_summary,
+                    deployed_at=row.deployed_at,
+                    deployed_by=row.deployed_by,
+                )
+                for row in rows
+            ]
+
 
 # --- Stubs for the rest (implemented as needed in their consuming work areas) ---
 
@@ -549,6 +779,7 @@ __all__ = [
     "DeployRepository",
     "DeployRow",
     "DiagnosisRepository",
+    "EnrichmentWriteResult",
     "EvalRunRepository",
     "IncidentRepository",
     "IngestResult",
@@ -560,4 +791,5 @@ __all__ = [
     "PostgresOutboxRepository",
     "ResolutionRepository",
     "RunbookRepository",
+    "StoredEnrichmentContext",
 ]

@@ -12,6 +12,8 @@ import contextlib
 import logging
 from datetime import UTC, datetime
 
+from opentelemetry import propagate
+
 from sentinel.ingestion.kafka_producer import KafkaProducer
 from sentinel.observability.metrics import (
     outbox_event_stuck_total,
@@ -63,12 +65,18 @@ class OutboxDrainer:
                 if event.attempts >= self._max_attempts:
                     outbox_event_stuck_total.inc()
                     continue
+                carrier: dict[str, str] = {}
+                propagate.inject(carrier)
+                headers: list[tuple[str, bytes]] | None = (
+                    [(k, v.encode()) for k, v in carrier.items()] if carrier else None
+                )
                 try:
                     await asyncio.wait_for(
                         self._producer.emit(
                             topic=event.topic,
                             key=event.key,
                             payload=event.payload,
+                            headers=headers,
                         ),
                         timeout=self._emit_timeout,
                     )

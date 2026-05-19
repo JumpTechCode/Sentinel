@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Generic, Literal, TypeVar
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -86,6 +87,9 @@ class IncidentContext(BaseModel):
     """All six fetcher sections, each as its own FetcherResult."""
 
     model_config = ConfigDict(frozen=True)
+
+    incident_id: UUID
+    assembled_at: datetime
 
     recent_deploys: FetcherResult[DeployItem]
     related_alerts: FetcherResult[RelatedAlertItem]

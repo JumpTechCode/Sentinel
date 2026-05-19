@@ -2,6 +2,7 @@
 """FetcherResult is generic per the spec; IncidentContext groups six sections."""
 
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -45,6 +46,8 @@ def test_failed_result_requires_error_message() -> None:
 
 def test_empty_context_is_valid() -> None:
     ctx = IncidentContext(
+        incident_id=uuid4(),
+        assembled_at=_now(),
         recent_deploys=FetcherResult[DeployItem](status="ok", data=[], fetched_at=_now()),
         related_alerts=FetcherResult[RelatedAlertItem](status="ok", data=[], fetched_at=_now()),
         similar_incidents=FetcherResult[SimilarIncidentItem](
