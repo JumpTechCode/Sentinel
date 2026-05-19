@@ -468,7 +468,7 @@ Emitting now avoids a backfill later. The `EnrichmentConsumer`'s `_ACCEPTED_EVEN
 **New in this PR**:
 - `sentinel_hallucinated_evidence_total` (Counter) — bumped when a diagnosis is flagged.
 - `sentinel_diagnoses_total{status}` (Counter) — `new | duplicate`.
-- `sentinel_diagnosis_failures_total{reason}` (Counter) — `schema | timeout | transport | no_tool_call | missing_context | missing_incident`.
+- `sentinel_diagnosis_failures_total{reason}` (Counter) — `schema | timeout | transport | no_tool_call | missing_context | missing_incident | exception`. `exception` is the outer catch-all for errors not caught by a named branch (repository / outbox failures, etc.); recurring `exception`-labelled failures should be decomposed into named branches.
 - `sentinel_diagnosis_input_truncated_total{section}` (Counter) — bumped per section per call when truncation drops anything.
 - `sentinel_diagnosis_llm_tokens_total{kind}` (Counter) — `input | output`.
 - `sentinel_diagnosis_invalid_events_total` (Counter) — envelope/JSON parse failures.
@@ -521,6 +521,7 @@ structlog, JSON:
 | Hallucinated evidence | `diagnosis_completed{hallucinated=true}` | `hallucinated_evidence_total` | Persisted with `confidence ≤ 0.4` and verified citations only. Healthy operation; this is the quality signal. |
 | Duplicate (re-delivery, same prompt + model) | `diagnosis_duplicate` | `diagnoses_total{status=duplicate}` | No-op insert; no outbox event; offset committed. |
 | Token budget overflow | (impossible — truncation runs first) | `input_truncated_total{section}` | Truncated, logged, processed normally. |
+| Unexpected error (repository, outbox-insert, anything not caught above) | `diagnoser_event_failed` w/ traceback | `diagnosis_failures_total{reason=exception}` | Offset **not** committed → Kafka redelivers. A recurring `exception`-labelled failure means a new named branch should be added. |
 
 ### Acceptance criteria
 
