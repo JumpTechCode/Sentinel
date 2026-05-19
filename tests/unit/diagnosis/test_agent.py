@@ -19,8 +19,10 @@ from sentinel.diagnosis.errors import (
 from sentinel.diagnosis.llm_client import LLMResult
 from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.diagnosis.prompt import PromptBundle
+from sentinel.observability.cost import usd_cost
 from sentinel.observability.metrics import (
     diagnosis_llm_tokens_total,
+    llm_cost_usd_total,
     llm_tokens_total,
 )
 from sentinel.schemas.api import IncidentDetailResponse
@@ -153,6 +155,10 @@ async def test_hallucinated_caps_confidence_and_drops_invented() -> None:
 
 
 async def test_schema_invalid_then_valid_succeeds_after_one_retry() -> None:
+    """Both attempts spend tokens against the Anthropic bill, so both must be
+    metered (#30). The audit logger already records per-attempt; the Prometheus
+    counters were previously read once after the loop and under-counted by one
+    attempt's worth of tokens on the retry-then-success path."""
     ctx = make_context(deploys=[make_deploy("abc")])
     bad = dict(
         hypothesis="",  # empty — fails min_length
@@ -171,21 +177,50 @@ async def test_schema_invalid_then_valid_succeeds_after_one_retry() -> None:
         likely_category="deploy",
     )
     llm = AsyncMock()
-    llm.model = "m"
+    # Use a real model name so `usd_cost` returns non-zero — lets us assert the
+    # cost counter sees both attempts, not just the successful one.
+    llm.model = "claude-sonnet-4-5"
+    # Distinct token counts per attempt make double-counting / under-counting
+    # immediately visible in the assertions below.
     llm.diagnose_call.side_effect = [
         LLMResult(
             tool_input=bad, input_tokens=10, output_tokens=5, stop_reason="tool_use", latency_ms=5
         ),
         LLMResult(
-            tool_input=good, input_tokens=10, output_tokens=5, stop_reason="tool_use", latency_ms=5
+            tool_input=good, input_tokens=20, output_tokens=7, stop_reason="tool_use", latency_ms=5
         ),
     ]
     audit = MagicMock()
     deps = DiagnosisDeps(llm=llm, prompt=_bundle(), max_input_tokens=12_000, audit_logger=audit)
+
+    before_diag_in = diagnosis_llm_tokens_total.labels(kind="input")._value.get()
+    before_diag_out = diagnosis_llm_tokens_total.labels(kind="output")._value.get()
+    before_model_in = llm_tokens_total.labels(model=llm.model, kind="input")._value.get()
+    before_model_out = llm_tokens_total.labels(model=llm.model, kind="output")._value.get()
+    before_cost = llm_cost_usd_total.labels(model=llm.model)._value.get()
+
     out = await diagnose(_incident(ctx.incident_id), ctx, deps)
     assert out.hypothesis == "h"
     assert llm.diagnose_call.await_count == 2
     assert audit.record.call_count == 2
+
+    # Both attempts' tokens are metered: 10+20 input, 5+7 output. Without the
+    # fix the deltas would be 20 and 7 (only the successful attempt).
+    assert diagnosis_llm_tokens_total.labels(kind="input")._value.get() == before_diag_in + 10 + 20
+    assert diagnosis_llm_tokens_total.labels(kind="output")._value.get() == before_diag_out + 5 + 7
+    assert (
+        llm_tokens_total.labels(model=llm.model, kind="input")._value.get()
+        == before_model_in + 10 + 20
+    )
+    assert (
+        llm_tokens_total.labels(model=llm.model, kind="output")._value.get()
+        == before_model_out + 5 + 7
+    )
+    # Cost counter sees both attempts' cost, not just the successful one.
+    expected_cost = float(usd_cost(llm.model, 10, 5)) + float(usd_cost(llm.model, 20, 7))
+    assert llm_cost_usd_total.labels(model=llm.model)._value.get() == pytest.approx(
+        before_cost + expected_cost
+    )
 
 
 async def test_audit_logger_records_one_line_per_call_attempt() -> None:

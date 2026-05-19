@@ -69,6 +69,15 @@ async def diagnose(
             tool_schema=tool_schema,
             tool_name=_TOOL_NAME,
         )
+        # Meter tokens and cost per attempt: a retried attempt still spent
+        # tokens against the Anthropic bill, so all attempts must be counted
+        # (audit logger already records one line per attempt).
+        attempt_cost = usd_cost(deps.llm.model, last_result.input_tokens, last_result.output_tokens)
+        diagnosis_llm_tokens_total.labels(kind="input").inc(last_result.input_tokens)
+        diagnosis_llm_tokens_total.labels(kind="output").inc(last_result.output_tokens)
+        llm_tokens_total.labels(model=deps.llm.model, kind="input").inc(last_result.input_tokens)
+        llm_tokens_total.labels(model=deps.llm.model, kind="output").inc(last_result.output_tokens)
+        llm_cost_usd_total.labels(model=deps.llm.model).inc(float(attempt_cost))
         deps.audit_logger.record(
             incident_id=str(incident.id),
             model=deps.llm.model,
@@ -76,9 +85,7 @@ async def diagnose(
             prompt_sha=deps.prompt.sha256_hex,
             input_tokens=last_result.input_tokens,
             output_tokens=last_result.output_tokens,
-            cost_usd=str(
-                usd_cost(deps.llm.model, last_result.input_tokens, last_result.output_tokens)
-            ),
+            cost_usd=str(attempt_cost),
             retry_attempt=attempt,
         )
         try:
@@ -107,15 +114,10 @@ async def diagnose(
 
     diagnosis_latency_seconds.observe(last_result.latency_ms / 1000.0)
     diagnosis_confidence.observe(float(confidence))
-    diagnosis_llm_tokens_total.labels(kind="input").inc(last_result.input_tokens)
-    diagnosis_llm_tokens_total.labels(kind="output").inc(last_result.output_tokens)
-    # Also increment the general llm_tokens_total{model,kind} for per-model
-    # breakdown — used by Grafana panels that aggregate across non-diagnosis
-    # LLM calls once those exist.
-    llm_tokens_total.labels(model=deps.llm.model, kind="input").inc(last_result.input_tokens)
-    llm_tokens_total.labels(model=deps.llm.model, kind="output").inc(last_result.output_tokens)
-    cost = usd_cost(deps.llm.model, last_result.input_tokens, last_result.output_tokens)
-    llm_cost_usd_total.labels(model=deps.llm.model).inc(float(cost))
+    # Token/cost counters are incremented per-attempt inside the retry loop;
+    # `attempt_cost` here is the successful attempt's cost (from the final loop
+    # iteration), reused for the `token_usage` field on the persisted record.
+    cost = attempt_cost
 
     return PersistedDiagnosis(
         hypothesis=diagnosis_obj.hypothesis,
