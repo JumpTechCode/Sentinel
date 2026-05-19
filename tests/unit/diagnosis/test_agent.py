@@ -10,7 +10,12 @@ from uuid import UUID
 import pytest
 from sentinel.diagnosis.agent import diagnose
 from sentinel.diagnosis.deps import DiagnosisDeps
-from sentinel.diagnosis.errors import DiagnosisInvalid, LLMTimeout
+from sentinel.diagnosis.errors import (
+    DiagnosisInvalid,
+    LLMNoToolCall,
+    LLMTimeout,
+    LLMTransport,
+)
 from sentinel.diagnosis.llm_client import LLMResult
 from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.diagnosis.prompt import PromptBundle
@@ -202,3 +207,59 @@ async def test_timeout_bubbles_LLMTimeout() -> None:
     llm.diagnose_call.side_effect = LLMTimeout("t")
     with pytest.raises(LLMTimeout):
         await diagnose(_incident(ctx.incident_id), ctx, _deps(llm))
+
+
+@pytest.mark.parametrize("error_cls", [LLMTransport, LLMNoToolCall])
+async def test_llm_errors_bubble_without_retry(error_cls: type[Exception]) -> None:
+    """LLMTransport and LLMNoToolCall propagate to the caller — the consumer
+    relies on this to decide NOT to commit the Kafka offset so the event is
+    redelivered (or, for no_tool_call, surfaces as a transport-shaped failure).
+    The agent does NOT swallow these; it does NOT retry them (only Pydantic
+    ValidationError gets the one retry)."""
+    ctx = make_context(deploys=[make_deploy("abc")])
+    llm = AsyncMock()
+    llm.model = "m"
+    llm.diagnose_call.side_effect = error_cls("boom")
+    with pytest.raises(error_cls):
+        await diagnose(_incident(ctx.incident_id), ctx, _deps(llm))
+    assert llm.diagnose_call.await_count == 1, "LLM* errors must NOT trigger a retry"
+
+
+async def test_token_usage_includes_cost_and_prompt_sha() -> None:
+    """PersistedDiagnosis.token_usage carries the per-call cost (non-zero
+    string) and the prompt SHA so the persisted row is reconstructable and
+    Grafana can join cost across prompt versions."""
+    deploy = make_deploy("abc")
+    ctx = make_context(deploys=[deploy])
+    tool_input = dict(
+        hypothesis="h",
+        confidence=0.7,
+        reasoning="r",
+        evidence=[{"kind": "deploy", "id": "deploy:abc", "note": "n"}],
+        suggested_actions=[],
+        likely_category="deploy",
+    )
+    llm = AsyncMock()
+    llm.model = "claude-sonnet-4-5"
+    llm.diagnose_call.return_value = LLMResult(
+        tool_input=tool_input,
+        input_tokens=1000,
+        output_tokens=500,
+        stop_reason="tool_use",
+        latency_ms=200,
+    )
+    bundle = _bundle()  # PromptBundle(version="v1", system_text="sys", sha256_hex="0"*64)
+    deps = DiagnosisDeps(llm=llm, prompt=bundle, max_input_tokens=12_000, audit_logger=MagicMock())
+
+    out = await diagnose(_incident(ctx.incident_id), ctx, deps)
+
+    assert out.token_usage["input"] == 1000
+    assert out.token_usage["output"] == 500
+    # cost_usd is a stringified Decimal; non-trivially non-zero for 1500 tokens.
+    cost_str = out.token_usage["cost_usd"]
+    assert isinstance(cost_str, str)
+    assert cost_str != "0"
+    assert Decimal(cost_str) > Decimal("0")
+    # prompt_sha is the bundle's SHA verbatim so the persisted row can be
+    # joined back to the exact prompt that produced it.
+    assert out.token_usage["prompt_sha"] == bundle.sha256_hex
