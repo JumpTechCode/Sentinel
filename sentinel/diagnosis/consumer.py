@@ -64,7 +64,7 @@ class DiagnosisConsumer:
             if self._stop_event.is_set():
                 break
             try:
-                committed = await self._handle(msg)
+                committed = await self.handle_message(msg)
             except Exception:
                 _LOG.exception(
                     "diagnoser_event_failed",
@@ -78,7 +78,7 @@ class DiagnosisConsumer:
             if committed:
                 await self._consumer.commit()
 
-    async def _handle(self, msg: Any) -> bool:
+    async def handle_message(self, msg: Any) -> bool:
         """Returns True iff the offset should be committed."""
         try:
             payload = json.loads(msg.value)

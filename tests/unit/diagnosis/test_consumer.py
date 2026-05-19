@@ -366,7 +366,7 @@ async def test_unexpected_exception_increments_exception_reason_and_does_not_com
     msgs = [_enriched_msg(incident_id)]
     incident_repo = AsyncMock()
     # Sabotage the repository: an unexpected error type (not DiagnosisInvalid,
-    # not LLMError) bubbles out of _handle into run()'s outer catch.
+    # not LLMError) bubbles out of handle_message into run()'s outer catch.
     incident_repo.get.side_effect = RuntimeError("db dropped")
     diagnosis_repo = AsyncMock()
     agent_fn = AsyncMock()
