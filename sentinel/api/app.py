@@ -16,6 +16,11 @@ from sentinel import __version__
 from sentinel.api.routes.health import router as health_router
 from sentinel.api.routes.webhooks import router as webhooks_router
 from sentinel.config.settings import load_settings
+from sentinel.diagnosis.agent import diagnose as diagnose_fn
+from sentinel.diagnosis.consumer import DiagnosisConsumer
+from sentinel.diagnosis.deps import ConsumerDeps as DiagnosisConsumerDeps
+from sentinel.diagnosis.llm_client import AnthropicClient
+from sentinel.diagnosis.prompt import PromptBundle
 from sentinel.enrichment import (
     EnrichmentDeps,
     assemble,
@@ -33,10 +38,12 @@ from sentinel.ingestion.idempotency import RedisIdempotencyStore
 from sentinel.ingestion.kafka_producer import KafkaProducer
 from sentinel.ingestion.outbox_drainer import OutboxDrainer
 from sentinel.ingestion.webhook import WebhookHandler
+from sentinel.observability.llm_audit import LLMAuditLogger
 from sentinel.observability.tracing import configure_tracing
 from sentinel.persistence.repositories import (
     OutboxRepository,
     PostgresDeployRepository,
+    PostgresDiagnosisRepository,
     PostgresIncidentRepository,
     PostgresOutboxRepository,
 )
@@ -102,6 +109,51 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     enricher_task = asyncio.create_task(enricher.run(), name="enrichment-consumer")
     app.state.enrichment_consumer = enricher
 
+    # ---- Diagnosis ---------------------------------------------------------
+    # Guarded by `diagnosis_consumer_enabled` so it can be disabled in envs
+    # that lack Anthropic credentials (e.g., integration-test runs that only
+    # exercise ingestion/enrichment). The consumer subscribes to the same
+    # `sentinel.incidents` topic as the enricher but uses a distinct group ID
+    # so both receive every event independently.
+    diagnosis_task: asyncio.Task[None] | None = None
+    diag_kafka_consumer: AIOKafkaConsumer | None = None
+    diagnoser: DiagnosisConsumer | None = None
+    if settings.diagnosis_consumer_enabled:
+        diag_kafka_consumer = AIOKafkaConsumer(
+            settings.kafka_topic_incidents,
+            bootstrap_servers=settings.kafka_brokers,
+            group_id=settings.kafka_consumer_group_diagnoser,
+            enable_auto_commit=False,
+            auto_offset_reset="earliest",
+        )
+        await diag_kafka_consumer.start()
+
+        llm_client = AnthropicClient(
+            api_key=settings.anthropic_api_key,
+            model=settings.anthropic_model,
+            timeout_s=settings.diagnosis_llm_timeout_seconds,
+            max_output_tokens=settings.diagnosis_max_output_tokens,
+        )
+        prompt_bundle = PromptBundle.load(settings.diagnosis_prompt_version)
+        diagnosis_repo = PostgresDiagnosisRepository(session_factory)
+        audit_logger = LLMAuditLogger(settings.llm_audit_log_path)
+
+        diagnosis_deps = DiagnosisConsumerDeps(
+            llm=llm_client,
+            prompt=prompt_bundle,
+            max_input_tokens=settings.diagnosis_max_input_tokens,
+            incident_repo=incident_repo,
+            diagnosis_repo=diagnosis_repo,
+            audit_logger=audit_logger,
+        )
+        diagnoser = DiagnosisConsumer(
+            consumer=diag_kafka_consumer,
+            deps=diagnosis_deps,
+            agent_fn=diagnose_fn,
+        )
+        diagnosis_task = asyncio.create_task(diagnoser.run(), name="diagnosis-consumer")
+        app.state.diagnosis_consumer = diagnoser
+
     handler = WebhookHandler(
         incident_repo=incident_repo,
         idempotency=idempotency,
@@ -118,12 +170,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        # Shutdown sequence: enricher first (consumes from Kafka, may write
-        # outbox rows via the incident repo), then drainer (so it stops
-        # claiming new rows), then producer/redis/engine in parallel via
-        # gather. We collect exceptions so a failure in one cleanup doesn't
-        # mask the others — graceful shutdown means *all* resources get a
-        # chance to release.
+        # Shutdown sequence: diagnoser and enricher first (both consume from
+        # Kafka and may write rows via repos), then drainer (stops claiming new
+        # outbox rows), then producer/redis/engine in parallel via gather. We
+        # collect exceptions so a failure in one cleanup doesn't mask the
+        # others — graceful shutdown means *all* resources get a chance to
+        # release.
+        if diagnoser is not None and diagnosis_task is not None and diag_kafka_consumer is not None:
+            diagnoser.stop()
+            try:
+                await asyncio.wait_for(diagnosis_task, timeout=5.0)
+            except TimeoutError:
+                diagnosis_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await diagnosis_task
+            with contextlib.suppress(Exception):
+                await diag_kafka_consumer.stop()
+
         enricher.stop()
         try:
             await asyncio.wait_for(enricher_task, timeout=5.0)

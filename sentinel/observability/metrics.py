@@ -92,9 +92,35 @@ llm_cost_usd_total = _safe_counter(
     "LLM cost (USD), cumulative",
     ["model"],
 )
-hallucinated_evidence_rate = _safe_gauge(
-    "sentinel_hallucinated_evidence_rate",
-    "Fraction of diagnoses with invented citations",
+hallucinated_evidence_total = _safe_counter(
+    "sentinel_hallucinated_evidence_total",
+    "Diagnoses with at least one invented citation",
+    [],
+)
+diagnoses_total = _safe_counter(
+    "sentinel_diagnoses_total",
+    "Diagnoses persisted, by outcome status",
+    ["status"],
+)
+diagnosis_failures_total = _safe_counter(
+    "sentinel_diagnosis_failures_total",
+    "Diagnosis attempts that failed before persistence",
+    ["reason"],
+)
+diagnosis_input_truncated_total = _safe_counter(
+    "sentinel_diagnosis_input_truncated_total",
+    "Per-section count of context items dropped to fit input budget",
+    ["section"],
+)
+diagnosis_llm_tokens_total = _safe_counter(
+    "sentinel_diagnosis_llm_tokens_total",
+    "Tokens consumed by the diagnosis LLM call",
+    ["kind"],
+)
+diagnosis_invalid_events_total = _safe_counter(
+    "sentinel_diagnosis_invalid_events_total",
+    "Diagnosis Kafka envelopes that failed JSON/schema parse",
+    [],
 )
 diagnosis_correctness_rate_30d = _safe_gauge(
     "sentinel_diagnosis_correctness_rate_30d",
@@ -181,7 +207,12 @@ _NAME_TO_ATTR: dict[str, str] = {
     "sentinel_diagnosis_confidence": "diagnosis_confidence",
     "sentinel_llm_tokens_total": "llm_tokens_total",
     "sentinel_llm_cost_usd_total": "llm_cost_usd_total",
-    "sentinel_hallucinated_evidence_rate": "hallucinated_evidence_rate",
+    "sentinel_hallucinated_evidence_total": "hallucinated_evidence_total",
+    "sentinel_diagnoses_total": "diagnoses_total",
+    "sentinel_diagnosis_failures_total": "diagnosis_failures_total",
+    "sentinel_diagnosis_input_truncated_total": "diagnosis_input_truncated_total",
+    "sentinel_diagnosis_llm_tokens_total": "diagnosis_llm_tokens_total",
+    "sentinel_diagnosis_invalid_events_total": "diagnosis_invalid_events_total",
     "sentinel_diagnosis_correctness_rate_30d": "diagnosis_correctness_rate_30d",
     "sentinel_webhook_handler_duration_seconds": "webhook_handler_duration_seconds",
     "sentinel_outbox_events_enqueued_total": "outbox_events_enqueued_total",

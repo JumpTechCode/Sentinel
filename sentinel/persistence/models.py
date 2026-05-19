@@ -17,6 +17,7 @@ from uuid import UUID
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
@@ -132,6 +133,7 @@ class DiagnosisModel(Base):
     prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     token_usage: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    hallucinated_evidence: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -140,6 +142,12 @@ class DiagnosisModel(Base):
         CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_diagnoses_confidence_unit"),
         _check_in("likely_category", CATEGORY_VALUES),
         Index("idx_diagnoses_incident", "incident_id", text("created_at DESC")),
+        UniqueConstraint(
+            "incident_id",
+            "prompt_version",
+            "model",
+            name="uq_diagnoses_incident_prompt_model",
+        ),
     )
 
 

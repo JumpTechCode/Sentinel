@@ -20,15 +20,16 @@ from uuid import UUID
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.persistence.models import (
     DeployModel,
+    DiagnosisModel,
     IncidentModel,
     OutboxEventModel,
 )
 from sentinel.schemas.alert import NormalizedAlert
 from sentinel.schemas.api import IncidentDetailResponse, IncidentListItem, ResolveIncidentRequest
 from sentinel.schemas.context import DeployItem, IncidentContext, RelatedAlertItem
-from sentinel.schemas.diagnosis import Diagnosis
 from sentinel.schemas.enums import SeverityType
 
 # --- Read DTOs -------------------------------------------------------------- #
@@ -743,17 +744,14 @@ class PostgresDeployRepository:
 
 
 class DiagnosisRepository(Protocol):
-    async def save(
+    async def save_with_outbox(
         self,
-        incident_id: UUID,
-        diagnosis: Diagnosis,
         *,
-        model: str,
-        prompt_version: str,
-        latency_ms: int,
-        token_usage: dict[str, int],
-        hallucinated_evidence: bool,
-    ) -> UUID: ...
+        incident_id: UUID,
+        record: PersistedDiagnosis,
+        upstream_event_id: UUID,
+        outbox_event: OutboxEvent,
+    ) -> tuple[UUID, Literal["new", "duplicate"]]: ...
 
 
 class ResolutionRepository(Protocol):
@@ -772,6 +770,67 @@ class EvalRunRepository(Protocol):
     async def complete(self, run_id: UUID, summary: dict[str, float]) -> None: ...
 
 
+class PostgresDiagnosisRepository:
+    """Concrete ``DiagnosisRepository`` — INSERT ... ON CONFLICT DO NOTHING + atomic outbox."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def save_with_outbox(
+        self,
+        *,
+        incident_id: UUID,
+        record: PersistedDiagnosis,
+        upstream_event_id: UUID,
+        outbox_event: OutboxEvent,
+    ) -> tuple[UUID, Literal["new", "duplicate"]]:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                pg_insert(DiagnosisModel)
+                .values(
+                    incident_id=incident_id,
+                    hypothesis=record.hypothesis,
+                    confidence=record.confidence,
+                    reasoning=record.reasoning,
+                    evidence=[ref.model_dump(mode="json") for ref in record.evidence],
+                    suggested_actions=[a.model_dump(mode="json") for a in record.suggested_actions],
+                    likely_category=record.likely_category,
+                    hallucinated_evidence=record.hallucinated_evidence,
+                    model=record.model,
+                    prompt_version=record.prompt_version,
+                    latency_ms=record.latency_ms,
+                    token_usage=record.token_usage,
+                )
+                .on_conflict_do_nothing(constraint="uq_diagnoses_incident_prompt_model")
+                .returning(DiagnosisModel.id)
+            )
+            diagnosis_id = result.scalar_one_or_none()
+            if diagnosis_id is None:
+                existing = await session.execute(
+                    select(DiagnosisModel.id).where(
+                        DiagnosisModel.incident_id == incident_id,
+                        DiagnosisModel.prompt_version == record.prompt_version,
+                        DiagnosisModel.model == record.model,
+                    )
+                )
+                return existing.scalar_one(), "duplicate"
+
+            payload = {**outbox_event.payload, "diagnosis_id": str(diagnosis_id)}
+            await session.execute(
+                pg_insert(OutboxEventModel).values(
+                    id=outbox_event.id,
+                    topic=outbox_event.topic,
+                    key=outbox_event.key,
+                    payload=payload,
+                    attempts=0,
+                    created_at=outbox_event.created_at,
+                )
+            )
+            return diagnosis_id, "new"
+
+
 # Concrete classes for the stubbed Protocols above land with their consumers
 # (Work Areas G, H, K). Keeping the Protocols here means downstream modules
 # can depend on the interface without forcing the implementation now.
@@ -787,6 +846,7 @@ __all__ = [
     "OutboxEvent",
     "OutboxRepository",
     "PostgresDeployRepository",
+    "PostgresDiagnosisRepository",
     "PostgresIncidentRepository",
     "PostgresOutboxRepository",
     "ResolutionRepository",

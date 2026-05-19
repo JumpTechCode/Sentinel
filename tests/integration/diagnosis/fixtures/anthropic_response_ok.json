@@ -1,0 +1,18 @@
+{
+  "hypothesis": "Recent deploy changed the idempotency store backend, exhausting Redis connections.",
+  "confidence": 0.75,
+  "reasoning": "[deploy:abc123] changed the idempotency store. Logs show connection-acquisition failures.",
+  "evidence": [
+    {"kind": "deploy", "id": "deploy:abc123", "note": "the change"}
+  ],
+  "suggested_actions": [
+    {
+      "description": "Roll back the deploy and re-test.",
+      "command": "git revert abc123 && deploy payments-api",
+      "risk": "medium",
+      "rationale": "Restores prior known-good state.",
+      "requires_human_approval": true
+    }
+  ],
+  "likely_category": "deploy"
+}
