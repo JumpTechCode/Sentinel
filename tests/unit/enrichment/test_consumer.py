@@ -95,7 +95,7 @@ async def test_handle_valid_event_writes_context_and_commits() -> None:
         assemble_fn=_passthrough_assemble,
         topic="sentinel.incidents",
     )
-    await enricher._handle(_FakeMsg(value=_envelope()))
+    await enricher.handle_message(_FakeMsg(value=_envelope()))
     assert repo.write_calls == 1
 
 
@@ -109,7 +109,7 @@ async def test_handle_invalid_envelope_commits_and_counts() -> None:
         assemble_fn=_passthrough_assemble,
         topic="sentinel.incidents",
     )
-    await enricher._handle(_FakeMsg(value=b"not json"))
+    await enricher.handle_message(_FakeMsg(value=b"not json"))
     assert repo.write_calls == 0
 
 
@@ -123,7 +123,7 @@ async def test_handle_unknown_event_type_skips() -> None:
         assemble_fn=_passthrough_assemble,
         topic="sentinel.incidents",
     )
-    await enricher._handle(_FakeMsg(value=_envelope(event="incident.resolved")))
+    await enricher.handle_message(_FakeMsg(value=_envelope(event="incident.resolved")))
     assert repo.write_calls == 0
 
 
@@ -138,7 +138,7 @@ async def test_handle_missing_incident_skips() -> None:
         assemble_fn=_passthrough_assemble,
         topic="sentinel.incidents",
     )
-    await enricher._handle(_FakeMsg(value=_envelope()))
+    await enricher.handle_message(_FakeMsg(value=_envelope()))
     assert repo.write_calls == 0
 
 
@@ -169,7 +169,7 @@ async def test_handle_enriched_message_does_not_pollute_invalid_metric() -> None
     ).encode()
 
     before = enrichment_invalid_events_total._value.get()
-    await enricher._handle(_FakeMsg(value=enriched))
+    await enricher.handle_message(_FakeMsg(value=enriched))
     after = enrichment_invalid_events_total._value.get()
 
     assert repo.write_calls == 0
@@ -187,5 +187,5 @@ async def test_handle_duplicate_does_not_emit_outbox() -> None:
         assemble_fn=_passthrough_assemble,
         topic="sentinel.incidents",
     )
-    await enricher._handle(_FakeMsg(value=_envelope()))
+    await enricher.handle_message(_FakeMsg(value=_envelope()))
     assert repo.write_calls == 1

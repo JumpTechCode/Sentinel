@@ -67,7 +67,7 @@ class EnrichmentConsumer:
             if self._stop_event.is_set():
                 break
             try:
-                await self._handle(msg)
+                await self.handle_message(msg)
             except Exception:
                 log.exception(
                     "enricher_event_failed",
@@ -80,7 +80,10 @@ class EnrichmentConsumer:
                 continue
             await self._consumer.commit()
 
-    async def _handle(self, msg: Any) -> None:
+    async def handle_message(self, msg: Any) -> None:
+        """Process one Kafka message — public so unit tests can drive a single
+        envelope without spinning the full `run()` loop.
+        """
         try:
             payload = json.loads(msg.value)
         except ValueError:
