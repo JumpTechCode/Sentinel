@@ -27,7 +27,7 @@ from sentinel.schemas.enums import (
 
 class WebhookAcceptedResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
-    status: Literal["accepted", "duplicate"]
+    status: Literal["accepted", "recurred", "duplicate"]
     incident_id: UUID | None = None
 
 

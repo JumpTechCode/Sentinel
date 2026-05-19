@@ -100,6 +100,46 @@ diagnosis_correctness_rate_30d = _safe_gauge(
     "sentinel_diagnosis_correctness_rate_30d",
     "Fraction of diagnoses marked correct on resolution, 30d rolling",
 )
+webhook_handler_duration_seconds = _safe_histogram(
+    "sentinel_webhook_handler_duration_seconds",
+    "Webhook handler wall-clock duration.",
+    ["source"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
+)
+outbox_events_enqueued_total = _safe_counter(
+    "sentinel_outbox_events_enqueued_total",
+    "Outbox events written by topic.",
+    ["topic"],
+)
+outbox_events_published_total = _safe_counter(
+    "sentinel_outbox_events_published_total",
+    "Outbox events successfully published to Kafka.",
+    ["topic"],
+)
+outbox_events_failed_total = _safe_counter(
+    "sentinel_outbox_events_failed_total",
+    "Outbox events that failed to publish (per attempt).",
+    ["topic"],
+)
+outbox_publish_latency_seconds = _safe_histogram(
+    "sentinel_outbox_publish_latency_seconds",
+    "Outbox row age (created_at -> published_at) in seconds.",
+    ["topic"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+outbox_unpublished_count = _safe_gauge(
+    "sentinel_outbox_unpublished_count",
+    "Count of outbox rows with published_at IS NULL.",
+)
+outbox_oldest_unpublished_age_seconds = _safe_gauge(
+    "sentinel_outbox_oldest_unpublished_age_seconds",
+    "Age in seconds of the oldest unpublished outbox row.",
+)
+outbox_event_stuck_total = _safe_counter(
+    "sentinel_outbox_event_stuck_total",
+    "Outbox rows skipped because attempts >= max_attempts.",
+    [],
+)
 
 _NAME_TO_ATTR: dict[str, str] = {
     "sentinel_webhooks_total": "webhooks_total",
@@ -113,6 +153,14 @@ _NAME_TO_ATTR: dict[str, str] = {
     "sentinel_llm_cost_usd_total": "llm_cost_usd_total",
     "sentinel_hallucinated_evidence_rate": "hallucinated_evidence_rate",
     "sentinel_diagnosis_correctness_rate_30d": "diagnosis_correctness_rate_30d",
+    "sentinel_webhook_handler_duration_seconds": "webhook_handler_duration_seconds",
+    "sentinel_outbox_events_enqueued_total": "outbox_events_enqueued_total",
+    "sentinel_outbox_events_published_total": "outbox_events_published_total",
+    "sentinel_outbox_events_failed_total": "outbox_events_failed_total",
+    "sentinel_outbox_publish_latency_seconds": "outbox_publish_latency_seconds",
+    "sentinel_outbox_unpublished_count": "outbox_unpublished_count",
+    "sentinel_outbox_oldest_unpublished_age_seconds": "outbox_oldest_unpublished_age_seconds",
+    "sentinel_outbox_event_stuck_total": "outbox_event_stuck_total",
 }
 
 

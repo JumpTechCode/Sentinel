@@ -7,6 +7,7 @@ from sentinel.persistence.models import (
     DiagnosisModel,
     EvalRunModel,
     IncidentModel,
+    OutboxEventModel,
     ResolutionModel,
     RunbookModel,
 )
@@ -26,6 +27,7 @@ def test_all_tables_registered_on_base() -> None:
         "deploys",
         "runbooks",
         "eval_runs",
+        "outbox_events",
     }
     actual = set(Base.metadata.tables.keys())
     assert expected.issubset(actual), f"missing: {expected - actual}"
@@ -67,3 +69,26 @@ def test_deploy_index_exists() -> None:
 
 def test_eval_run_table_exists() -> None:
     assert EvalRunModel.__tablename__ == "eval_runs"
+
+
+def test_outbox_events_table_in_metadata() -> None:
+    assert "outbox_events" in Base.metadata.tables
+
+
+def test_outbox_event_columns() -> None:
+    table = Base.metadata.tables["outbox_events"]
+    cols = {c.name: c for c in table.columns}
+    assert {
+        "id",
+        "topic",
+        "key",
+        "payload",
+        "created_at",
+        "published_at",
+        "attempts",
+        "last_attempt_at",
+        "last_error",
+    }.issubset(cols)
+    assert cols["published_at"].nullable is True
+    assert cols["attempts"].nullable is False
+    assert OutboxEventModel.__tablename__ == "outbox_events"

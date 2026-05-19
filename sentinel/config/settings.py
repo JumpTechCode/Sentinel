@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     http_host: str = "127.0.0.1"
     http_port: int = 8000
 
+    # Webhook secrets — per source, optional. Adapter rejects 401 when unset.
+    sentry_webhook_secret: SecretStr | None = None
+    pagerduty_webhook_secret: SecretStr | None = None
+    datadog_webhook_secret: SecretStr | None = None
+    generic_webhook_secret: SecretStr | None = None
+
     @classmethod
     def settings_customise_sources(
         cls,

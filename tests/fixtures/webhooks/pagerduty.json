@@ -1,0 +1,21 @@
+{
+  "event": {
+    "id": "01ABCDEF",
+    "event_type": "incident.triggered",
+    "resource_type": "incident",
+    "occurred_at": "2026-05-18T20:00:00Z",
+    "data": {
+      "id": "PINCD01",
+      "type": "incident",
+      "self": "https://example.pagerduty.com/incidents/PINCD01",
+      "title": "Datastore replication lag > 60s on shard 7",
+      "description": "Replication lag exceeded threshold on shard 7 (replica db-7b)",
+      "urgency": "high",
+      "service": {
+        "id": "PSVC01",
+        "summary": "datastore-replication",
+        "type": "service_reference"
+      }
+    }
+  }
+}

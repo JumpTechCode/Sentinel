@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sentinel.config.settings import Settings
 
 
@@ -68,3 +68,30 @@ def test_secret_is_secretstr(monkeypatch: MonkeyPatch) -> None:
     s = Settings()
     assert str(s.anthropic_api_key) == "**********"
     assert s.anthropic_api_key.get_secret_value() == "sk-real-secret-do-not-leak"
+
+
+def test_webhook_secrets_default_to_none(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_POSTGRES_DSN", "postgresql+asyncpg://x/y")
+    monkeypatch.setenv("SENTINEL_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("SENTINEL_KAFKA_BROKERS", "localhost:9092")
+    monkeypatch.setenv("SENTINEL_ANTHROPIC_API_KEY", "x")
+    monkeypatch.delenv("SENTINEL_SENTRY_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("SENTINEL_PAGERDUTY_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("SENTINEL_DATADOG_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("SENTINEL_GENERIC_WEBHOOK_SECRET", raising=False)
+    s = Settings()
+    assert s.sentry_webhook_secret is None
+    assert s.pagerduty_webhook_secret is None
+    assert s.datadog_webhook_secret is None
+    assert s.generic_webhook_secret is None
+
+
+def test_webhook_secrets_loaded_from_env(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_POSTGRES_DSN", "postgresql+asyncpg://x/y")
+    monkeypatch.setenv("SENTINEL_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("SENTINEL_KAFKA_BROKERS", "localhost:9092")
+    monkeypatch.setenv("SENTINEL_ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("SENTINEL_SENTRY_WEBHOOK_SECRET", "abc123")
+    s = Settings()
+    assert isinstance(s.sentry_webhook_secret, SecretStr)
+    assert s.sentry_webhook_secret.get_secret_value() == "abc123"

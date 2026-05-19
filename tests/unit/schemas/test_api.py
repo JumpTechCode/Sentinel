@@ -14,6 +14,7 @@ from sentinel.schemas.api import (
     IncidentDetailResponse,
     IncidentListItem,
     ResolveIncidentRequest,
+    WebhookAcceptedResponse,
 )
 from sentinel.schemas.diagnosis import Diagnosis, EvidenceRef, SuggestedAction
 
@@ -171,3 +172,16 @@ def test_incident_detail_response_round_trip() -> None:
         diagnoses=[],
     )
     assert IncidentDetailResponse.model_validate_json(resp.model_dump_json()) == resp
+
+
+# --- WebhookAcceptedResponse ------------------------------------------------ #
+
+
+def test_webhook_accepted_response_allows_recurred() -> None:
+    resp = WebhookAcceptedResponse(status="recurred", incident_id=None)
+    assert resp.status == "recurred"
+
+
+def test_webhook_accepted_response_rejects_unknown_status() -> None:
+    with pytest.raises(ValidationError):
+        WebhookAcceptedResponse.model_validate({"status": "something_else", "incident_id": None})
