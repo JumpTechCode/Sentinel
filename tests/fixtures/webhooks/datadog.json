@@ -1,0 +1,8 @@
+{
+  "alert_id": "DDALERT-42",
+  "alert_priority": "P2",
+  "event_title": "[Triggered on {host:web-12}] CPU > 90% for 5m",
+  "event_message": "Sustained high CPU on web-12; check recent deploys",
+  "tags": "env:prod,service:web-frontend,host:web-12,team:frontend",
+  "alert_status": "Triggered"
+}

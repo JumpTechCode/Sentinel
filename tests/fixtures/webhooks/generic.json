@@ -1,0 +1,8 @@
+{
+  "id": "ext-9001",
+  "service": "billing-worker",
+  "severity": "SEV2",
+  "title": "Stripe webhook delivery delay > 90s",
+  "description": "Backlog in stripe-webhook consumer",
+  "details": {"queue_depth": 4200}
+}

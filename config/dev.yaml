@@ -5,3 +5,9 @@ log_level: INFO
 http_host: 127.0.0.1
 http_port: 8000
 llm_audit_log_path: logs/llm-audit.log
+
+# Webhook secrets — set via env for dev. YAML keys present so the loader sees them.
+sentry_webhook_secret: null
+pagerduty_webhook_secret: null
+datadog_webhook_secret: null
+generic_webhook_secret: null

@@ -1,0 +1,18 @@
+{
+  "action": "created",
+  "installation": {"uuid": "00000000-0000-0000-0000-000000000001"},
+  "data": {
+    "issue": {
+      "id": "1234567",
+      "title": "ConnectionError: HTTPSConnectionPool(host='api.example.com', port=443)",
+      "culprit": "checkout.services/charge_card",
+      "level": "error",
+      "project": {
+        "id": "100",
+        "slug": "payments-api"
+      },
+      "metadata": {"type": "ConnectionError", "value": "Connection refused"}
+    }
+  },
+  "actor": {"type": "user", "id": "1", "name": "alertbot"}
+}
