@@ -49,12 +49,29 @@ _URL_RE = re.compile(r"https?://\S+")
 # Bracketed context tags: [ctx:foo], [deploy:abc123], etc.
 _BRACKETED_RE = re.compile(r"\[[^\]]*\]")
 
-# Orphaned closing delimiters left when inner content is stripped,
-# e.g. "(request_id=abcdef…)" → "(request_id=)" after hex strip.
-# Matches a lone ')' or ']' immediately following '=', '(', ',', or ';'.
+# Orphaned parenthesized key=/key: fragments left when inner content was
+# stripped, e.g. "(request_id=abcdef…)" → "(request_id=)" after hex strip,
+# or "(request_id=" if the closing paren was already consumed elsewhere.
+# `[^()=:]+` blocks nested parens and prevents `(a=b, c=)` from being eaten
+# whole; the optional trailing ')' covers both shapes above.
+_ORPHANED_PAREN_RE = re.compile(r"\(\s*[^()=:]+[=:]\s*\)?")
+
+# Lone closing ')' or ']' left dangling after content was stripped from
+# the field side of an assignment, e.g. "x=, y]" → "x=, y" or for the
+# rare case where _ORPHANED_PAREN_RE missed an unbalanced shape.
 _ORPHANED_CLOSE_RE = re.compile(r"(?<=[=(,;])\s*[)\]]")
 
 _WS_RE = re.compile(r"\s+")
+
+
+def _drop_empty_tokens(s: str) -> str:
+    """Strip trailing -, _, . from each token and drop tokens that become empty.
+
+    Runs after the substitution pipeline so that residue like "web-" / "service-"
+    (left when k8s/int suffixes were stripped) collapses to "web" / "service".
+    """
+    tokens = [tok.rstrip("-_.") for tok in s.split()]
+    return " ".join(tok for tok in tokens if tok)
 
 
 def normalize_title(s: str) -> str:
@@ -75,9 +92,14 @@ def normalize_title(s: str) -> str:
     s = _HEX_ID_RE.sub("", s)
     # Numeric tokens ≥ 3 digits (HTTP codes, port numbers, large counts).
     s = _INT_RE.sub("", s)
-    # Clean up orphaned closing delimiters left by inner-content removal.
+    # Drop orphaned "(key=)" / "(key:)" fragments left by inner-content removal.
+    s = _ORPHANED_PAREN_RE.sub("", s)
+    # Sweep any leftover lone closing bracket that the paren strip didn't reach.
     s = _ORPHANED_CLOSE_RE.sub("", s)
-    return _WS_RE.sub(" ", s).strip()
+    # Collapse whitespace, then strip trailing punctuation off any token whose
+    # tail was eaten by the substitutions above ("web-", "service-").
+    s = _WS_RE.sub(" ", s).strip()
+    return _drop_empty_tokens(s)
 
 
 _SEP = "\x1f"
