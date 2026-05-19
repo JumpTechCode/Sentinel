@@ -130,9 +130,13 @@ class DiagnosisConsumer:
             diagnosis_failures_total.labels(reason="schema").inc()
             return True
         except LLMError as e:
+            # NB: `logging.LogRecord` reserves the `msg` attribute, so the
+            # excerpt key must not collide with it — using `msg` here would
+            # raise KeyError from the logger and fall through to the outer
+            # catch as `reason="exception"`, hiding the real LLM failure.
             _LOG.error(
                 "diagnoser_llm_error",
-                extra={"error": type(e).__name__, "msg": str(e)[:200]},
+                extra={"error": type(e).__name__, "error_excerpt": str(e)[:200]},
             )
             reason = {
                 "LLMTimeout": "timeout",
