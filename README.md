@@ -13,7 +13,7 @@ A few load-bearing choices that distinguish Sentinel from a typical "LLM wrapper
 - **Fingerprint dedup, not external-ID dedup.** `sha256(service ‖ normalized_title ‖ severity)`. Same fingerprint within 1h updates the existing incident and appends to the event log; it does not create a new row. Raw-payload idempotency (`SETNX webhook:{source}:{sha256(body)}`, 24h TTL) defends against retried-with-changes.
 - **Evidence-citation gate.** After the LLM returns, every `EvidenceRef.id` must resolve to an item that was actually in the assembled context. Hallucinated citation → `hallucinated_evidence: true`, confidence capped at 0.4, metric incremented. This is the project's headline quality signal.
 - **Embedding on resolve, not on open.** Similar-incident retrieval improves once embeddings reflect actual root cause, not surface symptom. The "gets smarter from use" loop.
-- **Monolith with strict module boundaries.** Inter-module calls go through repository or service interfaces; non-`persistence/` modules never touch the DB directly. Splittable into services later without rewriting.
+- **Monolith with strict module boundaries.** Inter-module calls go through repository or service interfaces; non-`persistence/` modules never touch the DB directly. The API process owns both the enrichment and diagnosis Kafka consumers — horizontal scale is N API replicas sharing a consumer group, partition count caps concurrency. Splittable into services later without rewriting.
 
 ADRs for the non-obvious calls live in [`docs/adr/`](docs/adr/).
 
@@ -64,7 +64,6 @@ sentinel/
 ├── integrations/   sentry · pagerduty · datadog · generic — adapters normalize to NormalizedAlert
 ├── enrichment/     parallel fetchers + circuit breaker, orchestrator, Kafka consumer
 ├── diagnosis/      LLM client, versioned prompt bundle, validation gate, persistence, consumer
-├── workers/        long-running worker entrypoints (diagnosis_worker)
 ├── memory/         pgvector incident store + embedding pipeline                       (stub — H)
 ├── persistence/    SQLAlchemy models, Alembic migrations, repositories
 ├── observability/  Prometheus metrics, OTel tracing, structlog, LLM audit log + cost meter
@@ -121,7 +120,7 @@ If a code path can't articulate its failure mode, it isn't done.
 ```bash
 make bootstrap                 # create .venv, install runtime + dev deps, install pre-commit
 cp .env.example .env           # fill in SENTINEL_ANTHROPIC_API_KEY and per-source webhook secrets
-make compose-up                # boot Postgres, Redis, Kafka, app, worker (waits on healthchecks)
+make compose-up                # boot Postgres, Redis, Kafka, app (waits on healthchecks)
 curl localhost:8000/healthz    # → {"status":"ok"}
 make compose-down              # tear down (-v removes volumes)
 ```

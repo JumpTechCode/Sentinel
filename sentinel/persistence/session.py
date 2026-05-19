@@ -2,8 +2,8 @@
 """Async SQLAlchemy engine + session factory.
 
 Construction is pure (no connection attempt); callers control lifecycle. The
-engine pool is sized for the API process; the worker process uses its own
-engine instance via `make_async_engine`.
+API process owns a single engine for HTTP handlers and the in-process Kafka
+consumers; tests and utilities can build their own via `make_async_engine`.
 """
 
 from __future__ import annotations

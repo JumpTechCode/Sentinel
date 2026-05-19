@@ -28,6 +28,6 @@ RUN pip install --upgrade pip wheel \
 
 USER sentinel
 
-# Default to the API; compose overrides for the worker service.
+# Single entrypoint: the API process owns HTTP plus the in-process Kafka consumers.
 EXPOSE 8000
 CMD ["sentinel-api"]

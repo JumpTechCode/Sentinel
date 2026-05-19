@@ -58,7 +58,6 @@ Issues = "https://github.com/JumpTechCode/Sentinel/issues"
 
 [project.scripts]
 sentinel-api = "sentinel.api.app:run"
-sentinel-worker = "sentinel.workers.diagnosis_worker:run"
 
 [build-system]
 requires = ["setuptools>=75", "wheel"]

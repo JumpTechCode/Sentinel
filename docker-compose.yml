@@ -84,27 +84,6 @@ services:
       timeout: 3s
       retries: 20
 
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: ["sentinel-worker"]
-    depends_on:
-      kafka:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    environment:
-      SENTINEL_ENV: dev
-      SENTINEL_POSTGRES_DSN: postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
-      SENTINEL_REDIS_URL: redis://redis:6379/0
-      SENTINEL_KAFKA_BROKERS: kafka:9092
-      SENTINEL_ANTHROPIC_API_KEY: ${SENTINEL_ANTHROPIC_API_KEY:-sk-placeholder}
-      SENTINEL_SENTRY_WEBHOOK_SECRET: ${SENTINEL_SENTRY_WEBHOOK_SECRET:-}
-      SENTINEL_PAGERDUTY_WEBHOOK_SECRET: ${SENTINEL_PAGERDUTY_WEBHOOK_SECRET:-}
-      SENTINEL_DATADOG_WEBHOOK_SECRET: ${SENTINEL_DATADOG_WEBHOOK_SECRET:-}
-      SENTINEL_GENERIC_WEBHOOK_SECRET: ${SENTINEL_GENERIC_WEBHOOK_SECRET:-}
-
 volumes:
   sentinel_pg:
   sentinel_redis:
