@@ -161,10 +161,9 @@ outbox_oldest_unpublished_age_seconds = _safe_gauge(
     "sentinel_outbox_oldest_unpublished_age_seconds",
     "Age in seconds of the oldest unpublished outbox row.",
 )
-outbox_event_stuck_total = _safe_counter(
-    "sentinel_outbox_event_stuck_total",
-    "Outbox rows skipped because attempts >= max_attempts.",
-    [],
+outbox_stuck_events_count = _safe_gauge(
+    "sentinel_outbox_stuck_events_count",
+    "Count of distinct outbox rows where attempts >= max_attempts and published_at IS NULL.",
 )
 enrichment_assemble_duration_seconds = _safe_histogram(
     "sentinel_enrichment_assemble_duration_seconds",
@@ -221,7 +220,7 @@ _NAME_TO_ATTR: dict[str, str] = {
     "sentinel_outbox_publish_latency_seconds": "outbox_publish_latency_seconds",
     "sentinel_outbox_unpublished_count": "outbox_unpublished_count",
     "sentinel_outbox_oldest_unpublished_age_seconds": "outbox_oldest_unpublished_age_seconds",
-    "sentinel_outbox_event_stuck_total": "outbox_event_stuck_total",
+    "sentinel_outbox_stuck_events_count": "outbox_stuck_events_count",
     "sentinel_enrichment_assemble_duration_seconds": "enrichment_assemble_duration_seconds",
     "sentinel_enrichment_section_status_total": "enrichment_section_status_total",
     "sentinel_enrichment_events_consumed_total": "enrichment_events_consumed_total",

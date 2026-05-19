@@ -7,12 +7,12 @@ import pytest
 from prometheus_client import Counter, Gauge, Histogram
 from sentinel.observability import metrics as M
 from sentinel.observability.metrics import (
-    outbox_event_stuck_total,
     outbox_events_enqueued_total,
     outbox_events_failed_total,
     outbox_events_published_total,
     outbox_oldest_unpublished_age_seconds,
     outbox_publish_latency_seconds,
+    outbox_stuck_events_count,
     outbox_unpublished_count,
     webhook_handler_duration_seconds,
 )
@@ -37,7 +37,7 @@ def test_all_spec_metrics_exist() -> None:
         "sentinel_outbox_publish_latency_seconds": Histogram,
         "sentinel_outbox_unpublished_count": Gauge,
         "sentinel_outbox_oldest_unpublished_age_seconds": Gauge,
-        "sentinel_outbox_event_stuck_total": Counter,
+        "sentinel_outbox_stuck_events_count": Gauge,
     }
     for name, klass in expected.items():
         instance = getattr(M, M.attr_for(name))
@@ -107,4 +107,4 @@ def test_outbox_metrics_have_expected_labels() -> None:
     outbox_publish_latency_seconds.labels(topic="sentinel.incidents").observe(0.1)
     outbox_unpublished_count.set(0)
     outbox_oldest_unpublished_age_seconds.set(0)
-    outbox_event_stuck_total.inc()
+    outbox_stuck_events_count.set(0)

@@ -157,6 +157,16 @@ class OutboxRepository(Protocol):
         """
         ...
 
+    async def stuck_count(self, *, max_attempts: int) -> int:
+        """Return count of distinct unpublished outbox rows with attempts >= max_attempts.
+
+        Drives the ``outbox_stuck_events_count`` gauge. The drainer treats
+        these rows as permanently stuck (skipped each tick). A counter would
+        inflate by 1 per scan per stuck row; this gauge gives the correct
+        distinct-row count.
+        """
+        ...
+
 
 class PostgresOutboxRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -199,6 +209,17 @@ class PostgresOutboxRepository:
             return (0, 0.0)
         count, age = row
         return (int(count or 0), float(age or 0.0))
+
+    async def stuck_count(self, *, max_attempts: int) -> int:
+        stmt = select(func.count(OutboxEventModel.id)).where(
+            OutboxEventModel.published_at.is_(None),
+            OutboxEventModel.attempts >= max_attempts,
+        )
+        async with self._session_factory() as s:
+            row = (await s.execute(stmt)).first()
+        if row is None:
+            return 0
+        return int(row[0] or 0)
 
     @asynccontextmanager
     async def claim_batch(
