@@ -48,6 +48,7 @@ from sentinel.memory import (
     PgVectorIncidentStore,
 )
 from sentinel.observability.llm_audit import LLMAuditLogger
+from sentinel.observability.metrics import consumer_crashed_total
 from sentinel.observability.tracing import configure_tracing
 from sentinel.persistence.repositories import (
     OutboxRepository,
@@ -99,18 +100,25 @@ def _on_consumer_task_done(
 ) -> Callable[[asyncio.Task[None]], None]:
     """Build a done-callback that records consumer death.
 
-    A consumer task ending in any state other than cancellation is a failure
-    mode — either `start()` raised, the run-loop raised past its inner
-    `except Exception`, or the loop exited cleanly when it shouldn't have.
-    All three are operationally equivalent: that consumer is no longer
-    processing messages. The callback flips the per-consumer aliveness flag
-    (consumed by /readyz) and increments `sentinel_consumer_crashed_total`
-    so dashboards/alerts can page on a wedged stream.
+    Consumer tasks exit under three conditions:
+
+    1. **Cancelled** — graceful shutdown via task.cancel(). No-op.
+    2. **Clean return during shutdown** — `consumer.run()` saw its `_stop`
+       flag set and returned cleanly. No-op (gated on `app.state.shutting_down`
+       which the lifespan finally-block sets before calling `consumer.stop()`).
+       Without this gate, every graceful shutdown would spam the crash metric
+       and ERROR-log three lines per restart, destroying the signal value of
+       `sentinel_consumer_crashed_total`.
+    3. **Anything else** — start failure, run-loop crash past the inner
+       `except Exception`, or a clean return outside shutdown (a bug in the
+       consumer wrapper). All three are operationally a wedged stream:
+       flip aliveness, bump the crash counter, log ERROR with exc_info.
     """
-    from sentinel.observability.metrics import consumer_crashed_total
 
     def _callback(task: asyncio.Task[None]) -> None:
         if task.cancelled():
+            return
+        if getattr(app.state, "shutting_down", False):
             return
         alive = getattr(app.state, "consumer_alive", None)
         if isinstance(alive, dict):
@@ -152,6 +160,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # returns 503 if any entry is False or if the dict is missing/empty so
     # readiness gates don't route traffic to a pod that's lost a consumer.
     app.state.consumer_alive = {}
+    # Shutdown gate read by `_on_consumer_task_done`: a clean `run()` return
+    # while shutting_down is True is the expected outcome of `consumer.stop()`
+    # and must NOT be counted as a crash.
+    app.state.shutting_down = False
 
     redis = Redis.from_url(settings.redis_url)
     idempotency = RedisIdempotencyStore(redis)
@@ -311,6 +323,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Flip the shutdown gate BEFORE calling any consumer.stop(): once
+        # consumer.stop() lands, run() may return cleanly within the same event
+        # loop tick, firing the done_callback. Without `shutting_down=True`
+        # set first, that clean return would be mis-counted as a crash.
+        app.state.shutting_down = True
+
         # Shutdown sequence: diagnoser and enricher first (both consume from
         # Kafka and may write rows via repos), then drainer (stops claiming new
         # outbox rows), then producer/redis/engine in parallel via gather. We

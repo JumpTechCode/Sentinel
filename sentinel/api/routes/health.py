@@ -30,9 +30,12 @@ class Healthz(BaseModel):
     status: Literal["ok"] = "ok"
 
 
+CheckStatus = Literal["ok", "dead"]
+
+
 class Readyz(BaseModel):
     status: Literal["ok", "degraded", "unknown"] = "unknown"
-    checks: dict[str, str] = Field(default_factory=dict)
+    checks: dict[str, CheckStatus] = Field(default_factory=dict)
 
 
 @router.get("/healthz", response_model=Healthz)
@@ -58,7 +61,9 @@ async def readyz(request: Request) -> JSONResponse:
             status_code=503,
         )
 
-    checks = {f"consumer:{name}": "ok" if v else "dead" for name, v in alive.items()}
+    checks: dict[str, CheckStatus] = {
+        f"consumer:{name}": ("ok" if v else "dead") for name, v in alive.items()
+    }
     if all(alive.values()):
         return JSONResponse(
             content=Readyz(status="ok", checks=checks).model_dump(),
