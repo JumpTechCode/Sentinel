@@ -52,11 +52,11 @@ evals:  ## Full eval corpus (cassette replay)
 	$(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
 
 evals-smoke:  ## 5-case smoke set (cassette replay)
-	@if [ ! -d sentinel/evals/corpus ] || [ -z "$$(ls sentinel/evals/corpus/*.yaml 2>/dev/null)" ]; then \
+	@if [ -d sentinel/evals/corpus ] && [ -n "$$(ls sentinel/evals/corpus/*.yaml 2>/dev/null)" ]; then \
+	  $(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes --smoke; \
+	else \
 	  echo "evals-smoke: no corpus YAMLs at sentinel/evals/corpus — skipping (corpus lands in PR 3c)"; \
-	  exit 0; \
 	fi
-	$(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes --smoke
 
 evals-record:  ## (PR 3c) record cassettes from live API
 	$(PY) -m sentinel.evals record --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
