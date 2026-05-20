@@ -4,6 +4,12 @@
 
 Public engineering portfolio. Held to a production bar — every external call has a timeout and a circuit breaker, every LLM response is schema-validated, every evidence citation is verified, and the eval harness blocks regressions in CI.
 
+## Eval results
+
+<!-- evals:start -->
+*Pending PR 3c — first real corpus run lands the numbers here.*
+<!-- evals:end -->
+
 ## Why it's built this way
 
 A few load-bearing choices that distinguish Sentinel from a typical "LLM wrapper":
@@ -135,8 +141,9 @@ make test                      # unit tests
 make test-integration          # integration tests (needs `make compose-up`)
 make migrate                   # alembic upgrade head
 make migrate-down              # alembic downgrade -1
-make evals-smoke               # 5-case smoke set        (placeholder until Work Area K)
-make evals                     # full corpus             (placeholder until Work Area K)
+make evals-smoke               # 5-case smoke set (cassette replay)
+make evals                     # full corpus      (cassette replay)
+make readme-numbers            # patch README from the latest eval run
 make openapi                   # export OpenAPI JSON     (placeholder until Work Area I)
 ```
 

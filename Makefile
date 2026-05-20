@@ -6,8 +6,8 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
 .PHONY: help bootstrap fmt lint typecheck test test-unit test-integration \
-        migrate migrate-down evals evals-smoke load chaos \
-        compose-up compose-down openapi clean
+        migrate migrate-down evals evals-smoke evals-record evals-baseline \
+        readme-numbers load chaos compose-up compose-down openapi clean
 
 help:  ## Show available targets
 	@awk 'BEGIN{FS=":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*##/ {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -45,11 +45,20 @@ migrate:  ## alembic upgrade head
 migrate-down:  ## alembic downgrade -1
 	$(VENV)/bin/alembic downgrade -1
 
-evals:  ## Full eval corpus (placeholder until Work Area K)
-	@echo "evals: not implemented yet (Work Area K)"; exit 0
+evals:  ## Full eval corpus (cassette replay)
+	$(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
 
-evals-smoke:  ## 5-case smoke set (placeholder until Work Area K)
-	@echo "evals-smoke: not implemented yet (Work Area K)"; exit 0
+evals-smoke:  ## 5-case smoke set (cassette replay)
+	$(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes --smoke
+
+evals-record:  ## (PR 3c) record cassettes from live API
+	$(PY) -m sentinel.evals record --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
+
+evals-baseline:  ## (PR 3c) tag a baseline corpus run
+	$(PY) -m sentinel.evals baseline --corpus sentinel/evals/corpus --shots 5
+
+readme-numbers:  ## Patch README between evals:start/end markers from latest run
+	$(PY) -m sentinel.evals readme
 
 load:  ## Locust load test (placeholder until Work Area M)
 	@echo "load: not implemented yet (Work Area M)"; exit 0
