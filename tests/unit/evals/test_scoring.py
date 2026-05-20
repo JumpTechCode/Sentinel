@@ -48,6 +48,14 @@ class FakeEmbedder:
 
 
 # Basis vectors for known test strings: orthogonal unit vectors in slots 0..3.
+# Slots 4-5 are reserved for the "orthogonal-pair" test below — pinning those
+# strings into _BASIS eliminates the hash-collision flake that would otherwise
+# affect FakeEmbedder's fallback path (~25% chance of slot collision under
+# Python's default hash randomization).
+# Intentional: "rollback the deploy" / "Revert the BGP configuration change" /
+# "Roll back the deploy" all map to slot 0 — they're paraphrases that the
+# production embedder would map close together, and the action-coverage test
+# relies on the "perfect match" semantics.
 _BASIS: dict[str, list[float]] = {
     "rollback the deploy": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "BGP misconfiguration caused route propagation failures": [
@@ -72,6 +80,10 @@ _BASIS: dict[str, list[float]] = {
         0.0,
         0.0,  # ~0.99 cosine vs root_cause
     ],
+    # Explicitly orthogonal pair for the clamp-to-zero test — pinning avoids
+    # the FakeEmbedder hash collision flake.
+    "completely unrelated topic A": [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+    "totally different topic B": [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
 }
 
 
@@ -192,7 +204,11 @@ async def test_score_hypothesis_returns_cosine_in_unit_interval() -> None:
 async def test_score_hypothesis_clamps_to_zero_on_orthogonal() -> None:
     from sentinel.evals.scoring import score_hypothesis
 
-    embedder = FakeEmbedder()  # unknown strings → orthogonal-ish unit vectors
+    # Both strings are pinned to orthogonal vectors in _BASIS — deterministic 0.0
+    # cosine. Previously this test used FakeEmbedder's hash-fallback path with a
+    # 4-slot modulo, which had a ~25% chance of slot collision under Python's
+    # default hash randomization → cosine 1.0 → flaky failure.
+    embedder = FakeEmbedder(_BASIS)
     gt = GroundTruth(
         category="config",
         acceptable_categories=["config"],
@@ -201,7 +217,7 @@ async def test_score_hypothesis_clamps_to_zero_on_orthogonal() -> None:
     )
     d = _build_diagnosis(hypothesis="totally different topic B")
     score = await score_hypothesis(d, gt, embedder)
-    assert 0.0 <= score <= 0.5
+    assert score == 0.0
 
 
 # --- score_action_coverage ---
