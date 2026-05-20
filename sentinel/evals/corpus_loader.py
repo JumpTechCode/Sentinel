@@ -27,10 +27,19 @@ class CorpusValidationError(Exception):
 
 def load_case(path: Path) -> CorpusCase:
     """Load one YAML file as a CorpusCase. Raises FileNotFoundError on absent
-    file, CorpusValidationError on parse/validation failure (with the path
-    embedded in the message).
+    file, CorpusValidationError on any other read/parse/validation failure
+    (with the path embedded in the message).
     """
-    text = path.read_text(encoding="utf-8")  # raises FileNotFoundError if missing
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Preserve the missing-file contract callers may depend on.
+        raise
+    except (OSError, UnicodeDecodeError) as e:
+        # PermissionError, IsADirectoryError, decode failures, etc. — wrap so
+        # operators get the same path-embedded format as parse/validation errors.
+        raise CorpusValidationError(f"{path}: cannot read — {e}") from e
+
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
@@ -48,12 +57,14 @@ def load_case(path: Path) -> CorpusCase:
 
 
 def load_corpus_dir(dir_path: Path) -> list[CorpusCase]:
-    """Load all *.yaml files under a directory; returns cases sorted by case.id.
+    """Load all *.yaml / *.yml files under a directory; returns cases sorted by case.id.
 
-    Non-YAML files (README, .txt, hidden) are silently skipped.
+    Non-YAML files (README, .txt, hidden) are silently skipped. Both .yaml and
+    .yml extensions are accepted (Python YAML convention historically uses both
+    — silently skipping .yml would surprise a curator).
     Duplicate case IDs across files raise CorpusValidationError.
     """
-    yaml_files = sorted(dir_path.glob("*.yaml"))
+    yaml_files = sorted({*dir_path.glob("*.yaml"), *dir_path.glob("*.yml")})
     cases = [load_case(path) for path in yaml_files]
 
     # Guard against duplicate IDs — would silently produce duplicate metric rows

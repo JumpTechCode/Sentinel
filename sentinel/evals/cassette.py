@@ -86,6 +86,22 @@ class CassetteTransport(httpx.AsyncBaseTransport):
         # Default is httpx's standard AsyncHTTPTransport. Tests inject a fake
         # to avoid hitting the network.
         self._inner = inner_transport or httpx.AsyncHTTPTransport()
+        # Guard against accidentally recording a 401 cassette: if we're going
+        # to forward to the real Anthropic API (default inner transport in
+        # record mode) the operator must have ANTHROPIC_API_KEY set. Without
+        # it, the live call returns 401 and the silent-replay-forever loop
+        # would corrupt every future replay run.
+        if mode == "record" and inner_transport is None:
+            import os
+
+            if not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get(
+                "SENTINEL_ANTHROPIC_API_KEY"
+            ):
+                raise RuntimeError(
+                    "CassetteTransport record mode requires ANTHROPIC_API_KEY "
+                    "(or SENTINEL_ANTHROPIC_API_KEY) in the environment; the "
+                    "inner transport would otherwise record a 401 response"
+                )
         self._context: CassetteContext | None = None
         self._override_key: str | None = None  # test-only escape hatch
 
