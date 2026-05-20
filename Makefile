@@ -2,7 +2,10 @@
 SHELL := /bin/bash
 
 VENV ?= .venv
-PY := $(VENV)/bin/python
+# Prefer $(VENV)/bin/python (local dev) but fall back to plain python on PATH
+# so CI (which pip install -e .[dev]'s into the host Python without a venv)
+# can run the same targets without rewriting them.
+PY := $(shell test -x $(VENV)/bin/python && echo $(VENV)/bin/python || echo python)
 PIP := $(VENV)/bin/pip
 
 .PHONY: help bootstrap fmt lint typecheck test test-unit test-integration \
