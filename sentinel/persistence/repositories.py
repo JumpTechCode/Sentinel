@@ -127,6 +127,59 @@ class StoredEnrichmentContext:
     last_event_id: UUID
 
 
+@dataclass(frozen=True, slots=True)
+class EvalRunRecord:
+    """A persisted eval run as exposed to callers (immutable snapshot).
+
+    Note: status/trigger fields are Literal-typed for mypy, but the CHECK
+    constraint on the table is the runtime authority. Reading a row with a
+    value outside the literal set indicates the DB schema and code drifted.
+    """
+
+    id: UUID
+    status: Literal["running", "ok", "failed", "partial"]
+    trigger: Literal["local", "ci-smoke", "ci-nightly", "baseline", "manual"]
+    git_sha: str
+    model: str
+    prompt_version: str
+    embedding_model_id: str
+    corpus_version: str
+    corpus_size: int
+    shots_per_case: int
+    fetcher_fixture_hash: str
+    metrics: dict[str, float]
+    metrics_stability: dict[str, float]
+    regression_baseline_sha: str | None
+    regression_passed: bool | None
+    regression_detail: dict[str, Any] | None
+    extra: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class EvalCaseResultRecord:
+    """A persisted per-shot case result as exposed to callers (immutable snapshot).
+
+    incident_fingerprint/title/severity are denormalised from the incident at
+    write time so results remain self-contained after the runner truncates
+    the incidents table between cases.
+    """
+
+    run_id: UUID
+    case_id: str
+    shot_index: int
+    case_status: Literal["ok", "timeout", "ingest_failed", "schema_failed", "rate_limited"]
+    metrics: dict[str, float]
+    raw_response: dict[str, Any] | None
+    diagnosis: dict[str, Any] | None
+    incident_id: UUID | None
+    incident_fingerprint: str | None
+    incident_title: str | None
+    incident_severity: str | None
+    token_usage: dict[str, Any] | None
+    latency_ms: int | None
+    error_detail: str | None
+
+
 class OutboxBatch:
     """Context-managed batch of claimed outbox rows.
 
