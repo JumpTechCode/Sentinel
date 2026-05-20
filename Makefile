@@ -51,7 +51,7 @@ migrate-down:  ## alembic downgrade -1
 # Eval targets source .env into the shell so vars not loaded by pydantic-settings
 # (e.g. ANTHROPIC_API_KEY used by the cassette transport's record-mode guard
 # directly via os.environ) are visible to the CLI.
-_LOAD_ENV := set -a && [ -f .env.local ] && . ./.env.local; set +a
+_LOAD_ENV := set -a && [ -f .env ] && . ./.env; set +a
 
 evals-reset:  ## Wipe Kafka topic + Redis + Postgres state between eval runs
 	-docker exec sentinel-kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic sentinel.incidents 2>/dev/null
