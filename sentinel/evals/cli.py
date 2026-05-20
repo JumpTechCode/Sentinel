@@ -32,6 +32,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import re
 import sys
 import uuid
@@ -120,12 +121,43 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_p.set_defaults(func=_cmd_run)
 
-    # record (stub) ---------------------------------------------------------
-    rec_p = sub.add_parser("record", help="(PR 3c) record live cassettes from the corpus")
-    rec_p.add_argument("--corpus", type=Path, default=None)
-    rec_p.add_argument("--shots", type=int, default=1)
-    rec_p.add_argument("--cassette-dir", type=Path, default=None)
-    rec_p.set_defaults(func=_cmd_record_stub)
+    # record ----------------------------------------------------------------
+    # Mirrors `run` orchestration but flips the cassette transport into
+    # record mode (live Anthropic API → write cassette JSON to disk).
+    # Cassette dir is REQUIRED (no --live fallback — recording requires a
+    # target directory) and ANTHROPIC_API_KEY must be set.
+    rec_p = sub.add_parser(
+        "record",
+        help="record live cassettes from the corpus (writes to cassette dir)",
+        description=(
+            "Drives the corpus end-to-end against the live Anthropic API, "
+            "writing the captured HTTP exchanges into --cassette-dir as one "
+            "JSON file per (case, shot). REQUIRES SENTINEL_EVAL_MODE=true, "
+            "SENTINEL_EVAL_CORPUS_DIR, a cassette directory, and "
+            "ANTHROPIC_API_KEY (the inner transport hits the live API). "
+            "Stop the compose 'app' container first."
+        ),
+    )
+    rec_p.add_argument("--corpus", type=Path, default=None, help="corpus directory (YAML files)")
+    # Record shots default to 3 to match the replay default — the cassette
+    # key includes shot_index, so N replay shots need N recorded cassettes.
+    rec_p.add_argument("--shots", type=int, default=3, help="shots per case (default: 3)")
+    rec_p.add_argument(
+        "--cassette-dir",
+        type=Path,
+        default=None,
+        help="cassette write directory; overrides SENTINEL_EVAL_CASSETTE_DIR",
+    )
+    rec_p.add_argument(
+        "--smoke", action="store_true", help="record only the first 5 cases (sorted by id)"
+    )
+    rec_p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("evals/results"),
+        help="where to write the JSON + MD report (record runs also emit a report)",
+    )
+    rec_p.set_defaults(func=_cmd_record)
 
     # baseline (stub) -------------------------------------------------------
     base_p = sub.add_parser("baseline", help="(PR 3c) record a baseline corpus run")
@@ -168,34 +200,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """Run the corpus end-to-end. Returns the process exit code."""
+    """Run the corpus end-to-end (replay mode). Returns the process exit code."""
     try:
         settings = load_settings()
     except Exception as exc:  # pydantic-settings ValidationError, etc.
         print(f"error: failed to load settings — {exc}", file=sys.stderr)
         return 1
 
-    # Eval-mode guard — settings already validates eval_corpus_dir is set when
-    # eval_mode=True, so the only failure here is eval_mode=False.
-    if not settings.eval_mode:
-        print(
-            "error: SENTINEL_EVAL_MODE must be true to run evals "
-            "(set SENTINEL_EVAL_MODE=true and SENTINEL_EVAL_CORPUS_DIR=...)",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Hard guard: without the diagnosis consumer, the lifespan branch never
-    # wraps the AnthropicClient with the cassette transport — the cassette dir
-    # arg would be silently ignored and the runner would attempt live API calls.
-    # Surface this misconfig at startup rather than three minutes into a run.
-    if not settings.diagnosis_consumer_enabled:
-        print(
-            "error: SENTINEL_DIAGNOSIS_CONSUMER_ENABLED must be true for eval runs "
-            "(the cassette transport wraps the AnthropicClient inside the consumer)",
-            file=sys.stderr,
-        )
-        return 1
+    if (rc := _check_common_eval_guards(settings)) is not None:
+        return rc
 
     corpus_dir = args.corpus or settings.eval_corpus_dir
     if corpus_dir is None:
@@ -222,6 +235,120 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(f"error: runtime error during eval run — {exc}", file=sys.stderr)
         return 1
+
+
+def _cmd_record(args: argparse.Namespace) -> int:
+    """Record the corpus end-to-end against the live Anthropic API.
+
+    Reuses the same orchestration as ``_cmd_run`` — the only behavioral
+    difference is the cassette transport mode. We set
+    ``SENTINEL_EVAL_CASSETTE_MODE=record`` in ``os.environ`` BEFORE calling
+    ``load_settings()`` so the lifespan branch in ``sentinel.api.app`` picks
+    up the right mode when it constructs ``CassetteTransport``.
+
+    Additional guards vs. ``run``:
+      * cassette dir REQUIRED (no --live fallback)
+      * ANTHROPIC_API_KEY (or SENTINEL_ANTHROPIC_API_KEY) must be set
+    """
+    # Resolve the cassette dir BEFORE flipping the env var: if the operator
+    # passed --cassette-dir on the CLI we want that value to win, and the
+    # downstream Settings load reads SENTINEL_EVAL_CASSETTE_DIR from env. We
+    # don't need to pre-validate the cassette dir against settings here — we
+    # do that after load_settings() like the other guards.
+    api_key_present = bool(
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("SENTINEL_ANTHROPIC_API_KEY")
+    )
+    if not api_key_present:
+        print(
+            "error: ANTHROPIC_API_KEY (or SENTINEL_ANTHROPIC_API_KEY) must be set for record mode "
+            "(record hits the live Anthropic API; cassette dir captures the exchanges)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Flip the cassette mode BEFORE load_settings() so the lifespan branch in
+    # sentinel.api.app constructs CassetteTransport(mode="record", ...). We
+    # remember the prior value so a caller embedding the CLI can restore it
+    # — important for the test process, which reuses os.environ across cases.
+    prior_mode = os.environ.get("SENTINEL_EVAL_CASSETTE_MODE")
+    os.environ["SENTINEL_EVAL_CASSETTE_MODE"] = "record"
+    try:
+        try:
+            settings = load_settings()
+        except Exception as exc:
+            print(f"error: failed to load settings — {exc}", file=sys.stderr)
+            return 1
+
+        if (rc := _check_common_eval_guards(settings)) is not None:
+            return rc
+
+        corpus_dir = args.corpus or settings.eval_corpus_dir
+        if corpus_dir is None:
+            print("error: --corpus or SENTINEL_EVAL_CORPUS_DIR must be provided", file=sys.stderr)
+            return 1
+
+        cassette_dir = args.cassette_dir or settings.eval_cassette_dir
+        if cassette_dir is None:
+            print(
+                "error: --cassette-dir or SENTINEL_EVAL_CASSETTE_DIR required for record mode "
+                "(recording requires a target directory to write cassette JSON into)",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Ensure the lifespan sees the cassette dir via settings even if the
+        # operator only passed --cassette-dir on the CLI. Settings is frozen
+        # post-construction; the env var is the public knob the lifespan reads.
+        if args.cassette_dir is not None:
+            os.environ["SENTINEL_EVAL_CASSETTE_DIR"] = str(args.cassette_dir)
+            # Re-load so settings.eval_cassette_dir reflects the override.
+            settings = load_settings()
+
+        try:
+            return asyncio.run(_run_async(args, settings, corpus_dir))
+        except CassetteMiss as exc:
+            # CassetteMiss in record mode means the transport refused to write
+            # for some reason (or a code path bypassed record-mode). Surface it.
+            print(f"error: cassette miss during record run — {exc}", file=sys.stderr)
+            return 1
+        except RuntimeError as exc:
+            print(f"error: runtime error during record run — {exc}", file=sys.stderr)
+            return 1
+    finally:
+        if prior_mode is None:
+            os.environ.pop("SENTINEL_EVAL_CASSETTE_MODE", None)
+        else:
+            os.environ["SENTINEL_EVAL_CASSETTE_MODE"] = prior_mode
+
+
+def _check_common_eval_guards(settings: Settings) -> int | None:
+    """Shared guards for ``run`` and ``record``: eval_mode + diagnosis_consumer.
+
+    Returns an exit code (1) when a guard fails, or ``None`` when all pass.
+    Settings already validates ``eval_corpus_dir`` is set when ``eval_mode``
+    is True, so we don't re-check that here.
+    """
+    if not settings.eval_mode:
+        print(
+            "error: SENTINEL_EVAL_MODE must be true to run evals "
+            "(set SENTINEL_EVAL_MODE=true and SENTINEL_EVAL_CORPUS_DIR=...)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Without the diagnosis consumer, the lifespan branch never wraps the
+    # AnthropicClient with the cassette transport — the cassette dir arg
+    # would be silently ignored and the runner would attempt live API calls
+    # (or fail to write cassettes in record mode). Surface this at startup.
+    if not settings.diagnosis_consumer_enabled:
+        print(
+            "error: SENTINEL_DIAGNOSIS_CONSUMER_ENABLED must be true for eval runs "
+            "(the cassette transport wraps the AnthropicClient inside the consumer)",
+            file=sys.stderr,
+        )
+        return 1
+
+    return None
 
 
 async def _run_async(
@@ -359,16 +486,6 @@ async def _run_async(
     print(f"  json: {json_path}")
     print(f"  md:   {md_path}")
     return 0
-
-
-def _cmd_record_stub(_args: argparse.Namespace) -> int:
-    print(
-        "record: not implemented in PR 3b — use manual record flow until PR 3c lands.\n"
-        "  See plans/2026-05-20-eval-harness-design.md §3 for the manual recording "
-        "instructions; PR 3c wires this subcommand to the live-API path.",
-        file=sys.stderr,
-    )
-    return 1
 
 
 def _cmd_baseline_stub(_args: argparse.Namespace) -> int:

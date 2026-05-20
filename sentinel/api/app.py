@@ -296,7 +296,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             from sentinel.evals.cassette import CassetteTransport
 
             cassette_transport = CassetteTransport(
-                mode="replay",
+                mode=settings.eval_cassette_mode,
                 cassette_dir=settings.eval_cassette_dir,
             )
             cassette_http_client = httpx.AsyncClient(transport=cassette_transport)
