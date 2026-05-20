@@ -1010,6 +1010,17 @@ class DiagnosisRepository(Protocol):
         outbox_event: OutboxEvent,
     ) -> tuple[UUID, Literal["new", "duplicate"]]: ...
 
+    async def get_by_incident_id(self, incident_id: UUID) -> PersistedDiagnosis | None:
+        """Most recent diagnosis for an incident (by created_at DESC), or None.
+
+        Used by the eval harness runner to poll for the diagnosis after firing
+        a synthetic webhook. The UNIQUE constraint on (incident_id, prompt_version,
+        model) means multiple diagnoses per incident only happen across prompt
+        or model changes — the runner pins both, so 'most recent' is deterministic
+        within a single run.
+        """
+        ...
+
 
 class ResolutionRepository(Protocol):
     async def record(
@@ -1158,6 +1169,40 @@ class PostgresDiagnosisRepository:
                 )
             )
             return diagnosis_id, "new"
+
+    async def get_by_incident_id(self, incident_id: UUID) -> PersistedDiagnosis | None:
+        # Local imports because EvidenceRef/SuggestedAction aren't needed by any
+        # other method in this class; keeps top-of-file imports lean.
+        from sentinel.schemas.diagnosis import EvidenceRef, SuggestedAction
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(DiagnosisModel)
+                .where(DiagnosisModel.incident_id == incident_id)
+                .order_by(DiagnosisModel.created_at.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            return PersistedDiagnosis(
+                hypothesis=row.hypothesis,
+                # row.confidence is already Decimal (Numeric(3,2)) — matches
+                # PersistedDiagnosis.confidence: Decimal. Do NOT cast to float;
+                # mypy --strict would reject and Decimal precision would be lost.
+                confidence=row.confidence,
+                reasoning=row.reasoning,
+                evidence=[EvidenceRef.model_validate(e) for e in row.evidence],
+                suggested_actions=[
+                    SuggestedAction.model_validate(a) for a in row.suggested_actions
+                ],
+                likely_category=row.likely_category,  # type: ignore[arg-type]  # CHECK enforces
+                hallucinated_evidence=row.hallucinated_evidence,
+                model=row.model,
+                prompt_version=row.prompt_version,
+                latency_ms=row.latency_ms,
+                token_usage=row.token_usage,
+            )
 
 
 class PostgresResolutionRepository:
