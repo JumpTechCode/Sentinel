@@ -10,7 +10,12 @@ notes: >
   for 27 minutes. Primary category deploy (shipped via standard WAF pipeline);
   config also defensible (the rule itself is a config artifact).
 alert:
-  source: pagerduty
+  # Corpus uses `generic` source uniformly — the per-adapter envelope wrappers
+  # (sentry/pagerduty/datadog) carry different payload shapes that don't add
+  # diagnostic signal; the corpus tests diagnosis quality, not normalization.
+  # The postmortem records PagerDuty as the alert source; we keep that fact
+  # in `notes` and use the generic envelope at the wire level.
+  source: generic
   service: waf
   severity: SEV1
   title: WAF CPU exhaustion — 502 errors across all PoPs

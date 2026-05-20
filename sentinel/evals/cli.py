@@ -371,6 +371,16 @@ async def _run_async(
         print(f"error: no corpus cases found in {corpus_dir}", file=sys.stderr)
         return 1
 
+    # Kafka topic reset (stale-message hygiene) is intentionally NOT
+    # automated inside the CLI: doing it correctly requires a Kafka admin
+    # client + a wait for the delete to propagate before the producer
+    # subscribes, and getting that race right is fragile. The eval workflow
+    # instead expects the operator to run `make evals-reset` before
+    # `make evals-record` / `make evals` — a 3-line shell target that
+    # deletes the topic + flushes Redis + truncates Postgres.
+    # See plans/2026-05-20-eval-harness-pr3c-corpus-plan.md Task 3 for
+    # the canonical recipe.
+
     # Build the FastAPI app via the same factory uvicorn would use.
 
     from sentinel.api.app import build_app

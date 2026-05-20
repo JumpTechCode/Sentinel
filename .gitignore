@@ -120,3 +120,4 @@ evals/results/*.html
 *.key
 secrets/
 .secrets/
+evals/results/*.md

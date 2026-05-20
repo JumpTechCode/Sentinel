@@ -48,18 +48,28 @@ migrate:  ## alembic upgrade head
 migrate-down:  ## alembic downgrade -1
 	$(VENV)/bin/alembic downgrade -1
 
+# Eval targets source .env into the shell so vars not loaded by pydantic-settings
+# (e.g. ANTHROPIC_API_KEY used by the cassette transport's record-mode guard
+# directly via os.environ) are visible to the CLI.
+_LOAD_ENV := set -a && [ -f .env ] && . ./.env; set +a
+
+evals-reset:  ## Wipe Kafka topic + Redis + Postgres state between eval runs
+	-docker exec sentinel-kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic sentinel.incidents 2>/dev/null
+	-docker exec sentinel-redis-1 redis-cli FLUSHDB
+	-docker exec sentinel-postgres-1 psql -U sentinel -d sentinel -c "TRUNCATE incidents, diagnoses, outbox_events RESTART IDENTITY CASCADE;"
+
 evals:  ## Full eval corpus (cassette replay)
-	$(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
+	$(_LOAD_ENV); $(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
 
 evals-smoke:  ## 5-case smoke set (cassette replay)
 	@if [ -d sentinel/evals/corpus ] && [ -n "$$(ls sentinel/evals/corpus/*.yaml 2>/dev/null)" ]; then \
-	  $(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes --smoke; \
+	  $(_LOAD_ENV); $(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes --smoke; \
 	else \
 	  echo "evals-smoke: no corpus YAMLs at sentinel/evals/corpus — skipping (corpus lands in PR 3c)"; \
 	fi
 
 evals-record:  ## (PR 3c) record cassettes from live API
-	$(PY) -m sentinel.evals record --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
+	$(_LOAD_ENV); $(PY) -m sentinel.evals record --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
 
 evals-baseline:  ## (PR 3c) tag a baseline corpus run
 	$(PY) -m sentinel.evals baseline --corpus sentinel/evals/corpus --shots 5
