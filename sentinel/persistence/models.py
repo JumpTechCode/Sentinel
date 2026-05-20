@@ -227,8 +227,75 @@ class EvalRunModel(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger: Mapped[str] = mapped_column(Text, nullable=False)
+    git_sha: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
     prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_model_id: Mapped[str] = mapped_column(Text, nullable=False)
     corpus_version: Mapped[str] = mapped_column(Text, nullable=False)
-    results: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
-    summary: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    corpus_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    shots_per_case: Mapped[int] = mapped_column(Integer, nullable=False)
+    fetcher_fixture_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    metrics: Mapped[Any] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    metrics_stability: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    regression_baseline_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    regression_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    regression_detail: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    extra: Mapped[Any] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running','ok','failed','partial')",
+            name="ck_eval_runs_status_valid",
+        ),
+        CheckConstraint(
+            "trigger IN ('local','ci-smoke','ci-nightly','baseline','manual')",
+            name="ck_eval_runs_trigger_valid",
+        ),
+        Index("ix_eval_runs_started_at", text("started_at DESC")),
+        Index("ix_eval_runs_status", "status"),
+    )
+
+
+class EvalCaseResultModel(Base):
+    __tablename__ = "eval_case_results"
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("eval_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    case_id: Mapped[str] = mapped_column(Text, nullable=False)
+    shot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    case_status: Mapped[str] = mapped_column(Text, nullable=False)
+    metrics: Mapped[Any] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    raw_response: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    diagnosis: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    # Intentionally NO ForeignKey to incidents — see migration 0006 docstring.
+    incident_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    # Denormalised incident snapshot — survives the runner's truncation of
+    # the incidents table between cases (Braintrust / Inspect AI pattern).
+    incident_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    incident_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    incident_severity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_usage: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "case_id", "shot_index", name="uq_eval_case_results_run_case_shot"
+        ),
+        CheckConstraint(
+            "case_status IN ('ok','timeout','ingest_failed','schema_failed','rate_limited')",
+            name="ck_eval_case_results_status_valid",
+        ),
+        Index("ix_eval_case_results_run_id", "run_id"),
+        Index("ix_eval_case_results_case_run", "case_id", "run_id"),
+    )

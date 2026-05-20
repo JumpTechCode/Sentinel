@@ -4,10 +4,14 @@
 This is the only module allowed to perform raw SQL operations.
 """
 
+from sentinel.persistence.errors import (
+    EvalRunNotFoundOrAlreadyFinalized,
+)
 from sentinel.persistence.models import (
     Base,
     DeployModel,
     DiagnosisModel,
+    EvalCaseResultModel,
     EvalRunModel,
     IncidentModel,
     ResolutionModel,
@@ -17,9 +21,12 @@ from sentinel.persistence.repositories import (
     DeployRepository,
     DeployRow,
     DiagnosisRepository,
+    EvalCaseResultRecord,
+    EvalRunRecord,
     EvalRunRepository,
     IncidentRepository,
     PostgresDeployRepository,
+    PostgresEvalRunRepository,
     PostgresIncidentRepository,
     ResolutionRepository,
     RunbookRepository,
@@ -33,11 +40,16 @@ __all__ = [
     "DeployRow",
     "DiagnosisModel",
     "DiagnosisRepository",
+    "EvalCaseResultModel",
+    "EvalCaseResultRecord",
     "EvalRunModel",
+    "EvalRunNotFoundOrAlreadyFinalized",
+    "EvalRunRecord",
     "EvalRunRepository",
     "IncidentModel",
     "IncidentRepository",
     "PostgresDeployRepository",
+    "PostgresEvalRunRepository",
     "PostgresIncidentRepository",
     "ResolutionModel",
     "ResolutionRepository",
