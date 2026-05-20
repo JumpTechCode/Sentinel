@@ -246,16 +246,16 @@ async def _run_async(
 
             engine = create_async_engine(settings.postgres_dsn, future=True)
 
-            async def _truncate() -> None:
-                from sqlalchemy import text
+            # Truncate helper — raw SQL lives in persistence/ to honor the
+            # no-raw-SQL-outside-persistence project invariant.
+            from sqlalchemy.ext.asyncio import async_sessionmaker as _amsf
 
-                async with engine.begin() as conn:
-                    await conn.execute(
-                        text(
-                            "TRUNCATE incidents, diagnoses, outbox_events "
-                            "RESTART IDENTITY CASCADE"
-                        )
-                    )
+            from sentinel.persistence.repositories import truncate_eval_runtime_state
+
+            _truncate_factory = _amsf(engine, expire_on_commit=False)
+
+            async def _truncate() -> None:
+                await truncate_eval_runtime_state(_truncate_factory)
 
             # Diagnosis repo — distinct session factory from the in-process
             # FastAPI app so the runner's polling doesn't fight the lifespan's
