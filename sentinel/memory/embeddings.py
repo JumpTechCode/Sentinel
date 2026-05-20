@@ -30,9 +30,15 @@ class FastEmbedProvider:
         *,
         model_cache_dir: Path,
         compute_timeout_s: float = 5.0,
+        model_name: str = MODEL_NAME,
     ) -> None:
+        # `model_name` overrides the default so `Settings.embedding_model_name`
+        # is an honest knob (was previously dead config). The Dockerfile pre-
+        # downloads MODEL_NAME; selecting a different model requires either
+        # re-baking the image or accepting a one-time download on cold start.
         self._cache_dir = Path(model_cache_dir)
         self._timeout_s = compute_timeout_s
+        self._model_name = model_name
         self._model: TextEmbedding | None = None
         self._lock = asyncio.Lock()
 
@@ -44,10 +50,10 @@ class FastEmbedProvider:
 
             _LOG.info(
                 "loading_embedding_model",
-                extra={"model": self.MODEL_NAME, "cache_dir": str(self._cache_dir)},
+                extra={"model": self._model_name, "cache_dir": str(self._cache_dir)},
             )
             self._cache_dir.mkdir(parents=True, exist_ok=True)
-            self._model = TextEmbedding(model_name=self.MODEL_NAME, cache_dir=str(self._cache_dir))
+            self._model = TextEmbedding(model_name=self._model_name, cache_dir=str(self._cache_dir))
 
     def _embed_sync(self, text: str) -> list[float]:
         if self._model is None:

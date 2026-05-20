@@ -37,3 +37,19 @@ The retrieval filter (`status IN ('resolved','closed') AND diagnosis_was_correct
 - A resolved incident takes one extra MemoryConsumer event to become discoverable in its post-resolve form.
 - If the consumer is stalled, retrieval still works but with stale embeddings. The outbox + at-least-once guarantee means no permanent loss.
 - ADR 0006 (local embeddings) makes the compute essentially free, so embedding on both events has negligible cost.
+
+## Atomicity scope
+
+The `POST /incidents/{id}/resolve` handler's "atomic write" guarantee covers exactly three rows in a **single Postgres transaction** (`PostgresResolutionRepository.record`):
+
+1. `INSERT` into `incident_resolutions` (or 409 on duplicate via PK + `SELECT ... FOR UPDATE`),
+2. `UPDATE incidents SET status='resolved', resolved_at=now()`,
+3. `INSERT` an `incident.resolved` row into the outbox.
+
+**The embedding refresh is intentionally NOT part of this transaction.** It runs asynchronously when `MemoryConsumer` consumes the outbox-published `incident.resolved` event and calls `IncidentRepository.set_embedding`. Reasons:
+
+- Keeps the resolve endpoint's p99 bounded by Postgres latency, not fastembed cold-start (~80–150ms warm, ~1–2s cold).
+- Embedding failures must not block the resolution — operator-confirmed truth ships even if the model is briefly unavailable.
+- At-least-once redelivery + `set_embedding` idempotency (`UPDATE ... WHERE last_embedding_event_id IS DISTINCT FROM`) makes the refresh self-healing: stalled consumers catch up, redelivered events no-op.
+
+The transient window where `incidents.status='resolved'` but `incidents.embedding` still reflects the pre-resolution text is the explicit cost of this split. The retrieval filter (`status IN ('resolved','closed')`) means a freshly-resolved incident is *eligible* for retrieval before its embedding catches up — it just retrieves on its opened-path embedding for the gap, which is conservative.

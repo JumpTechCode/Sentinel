@@ -40,10 +40,14 @@ The provider lives behind the existing `EmbeddingProvider` Protocol in `sentinel
 If we later want to swap to a paid embedding provider (e.g., OpenAI `text-embedding-3-large` for higher quality):
 
 1. Add a new `OpenAIEmbeddings` class implementing the same `EmbeddingProvider` Protocol.
-2. Settings switch `embedding_provider` between `"local"` and `"openai"` (a future pluggable layer; not present in V1).
+2. Introduce a `Settings.embedding_provider` switch between `"local"` and `"openai"` (a future pluggable layer; not present in V1 — today only the local provider is wired).
 3. If the new provider produces a different dimension, another migration changes the column shape — same drop+recreate pattern as 0005.
 
 The Protocol seam means no other code changes.
+
+### Model-name knob
+
+`Settings.embedding_model_name` is plumbed through `FastEmbedProvider(model_name=...)`. The default (`BAAI/bge-large-en-v1.5`) matches the model pre-downloaded into the Docker image, so the out-of-the-box install is offline-fast. Changing the setting selects a different fastembed-supported model; on first use the runtime downloads it into `embedding_model_cache_dir`, which is slow on cold start and requires network access. For reproducible CI/demo, leave the default in place and rebuild the image rather than overriding at runtime.
 
 ## Alternatives rejected
 

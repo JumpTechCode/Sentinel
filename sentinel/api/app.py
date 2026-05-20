@@ -195,6 +195,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         embedding_provider = FastEmbedProvider(
             model_cache_dir=Path(settings.embedding_model_cache_dir),
             compute_timeout_s=settings.embedding_compute_timeout_seconds,
+            model_name=settings.embedding_model_name,
         )
 
         # CORRECTED constructor (Task 5 refactored to repo-delegation):
