@@ -7,9 +7,12 @@ schema module landing with PR 3 (the runner).
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any, Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from sentinel.schemas.enums import CategoryType
+from sentinel.schemas.enums import CategoryType, SeverityType
 
 
 class GroundTruth(BaseModel):
@@ -88,3 +91,101 @@ class RegressionVerdict(BaseModel):
     @property
     def regressed_metrics(self) -> list[str]:
         return [r.metric_name for r in self.per_metric if r.is_regression]
+
+
+# --- Corpus YAML shape (PR 3a) ---
+# Models below describe the corpus YAML structure. They're intentionally
+# separate from the production schema types in sentinel/schemas/context.py:
+# corpus seeds have only the fields a curator can supply (no DB-generated
+# UUIDs, no fetcher-computed timestamps). The fetcher_override module
+# translates seed → production type at fetch time.
+
+_AlertSource = Literal["generic", "sentry", "pagerduty", "datadog"]
+
+
+class AlertSeed(BaseModel):
+    """Synthetic webhook payload — what gets POSTed to /webhooks/{source}."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source: _AlertSource
+    service: str = Field(min_length=1)
+    severity: SeverityType
+    title: str = Field(min_length=1)
+    timestamp: datetime
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeploySeed(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str = Field(min_length=1)  # convention: `deploy:<sha>`
+    service: str = Field(min_length=1)
+    sha: str = Field(min_length=1)
+    pr_number: int | None = None
+    pr_title: str | None = None
+    pr_diff_summary: str | None = None
+    deployed_at: datetime
+    deployed_by: str | None = None
+
+
+class RelatedAlertSeed(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str = Field(min_length=1)  # convention: `related:<uuid>`
+    service: str = Field(min_length=1)
+    severity: SeverityType
+    title: str = Field(min_length=1)
+    opened_at: datetime
+
+
+class SimilarIncidentSeed(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str = Field(min_length=1)  # convention: `similar:<uuid>`
+    title: str = Field(min_length=1)
+    root_cause: str | None = None
+    remediation: str | None = None
+    resolved_at: datetime | None = None
+    cosine_similarity: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class RunbookSeed(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str = Field(min_length=1)  # convention: `runbook:<uuid>`
+    title: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+
+
+class LogSeed(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str = Field(min_length=1)  # convention: `log:<n>`
+    timestamp: datetime
+    level: Literal["debug", "info", "warning", "error", "critical"]
+    service: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+
+
+class ContextSeed(BaseModel):
+    """What enrichment would have returned — the CorpusFetcher replays this."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    deploys: list[DeploySeed] = Field(default_factory=list)
+    related_alerts: list[RelatedAlertSeed] = Field(default_factory=list)
+    similar_incidents: list[SimilarIncidentSeed] = Field(default_factory=list)
+    runbooks: list[RunbookSeed] = Field(default_factory=list)
+    recent_logs: list[LogSeed] = Field(default_factory=list)
+    active_alerts: list[RelatedAlertSeed] = Field(default_factory=list)
+
+
+class CorpusCase(BaseModel):
+    """One postmortem case, loaded from a YAML file under sentinel/evals/corpus/."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str = Field(min_length=1)
+    corpus_version: int = Field(ge=1)
+    source_url: str = Field(min_length=1)
+    sources_consulted: list[str] = Field(min_length=1)
+    notes: str = ""  # curator's free-text rationale; not scored
+    alert: AlertSeed
+    context_seed: ContextSeed
+    ground_truth: GroundTruth
