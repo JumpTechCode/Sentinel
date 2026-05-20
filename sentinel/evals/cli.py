@@ -405,25 +405,29 @@ async def _run_async(
 
             engine = create_async_engine(settings.postgres_dsn, future=True)
 
-            # Truncate helper — raw SQL lives in persistence/ to honor the
-            # no-raw-SQL-outside-persistence project invariant.
+            # truncate_between_cases is a no-op in eval mode. We used to
+            # TRUNCATE incidents/diagnoses + FLUSHDB Redis here, but:
+            #
+            # 1. The runner now uses per-shot external_ids
+            #    (`{case.id}-shot-{i}`) so every (case, shot) tuple creates a
+            #    unique incident → no Postgres collisions across cases.
+            #    Redis dedup keys derive from sha256(body), and the body
+            #    contains the unique id → no false-duplicates either.
+            # 2. Truncating between cases while the diagnoser is still
+            #    processing the previous case's events RACES with the
+            #    diagnoser's insert — causing
+            #    `diagnoses_incident_id_fkey` FK violations when the
+            #    incident is gone before the diagnosis row commits.
+            # 3. Between RUNS, `make evals-reset` does the full wipe; that
+            #    handles the only state-pollution concern that remains.
             from sqlalchemy.ext.asyncio import async_sessionmaker as _amsf
 
-            from sentinel.persistence.repositories import truncate_eval_runtime_state
-
-            _truncate_factory = _amsf(engine, expire_on_commit=False)
-
-            # Redis dedup cache lives at app.state.redis (set in lifespan).
-            # The webhook handler SETNXes `webhook:{source}:{sha256(body)}` with
-            # 24h TTL, returning {"status":"duplicate"} on a repeat. Without
-            # flushing between cases the second eval run (or any rerun within
-            # 24h) gets duplicates back for every case → 0 metrics across the
-            # board with no obvious symptom in the report.
-            _redis = app.state.redis
+            _truncate_factory = _amsf(engine, expire_on_commit=False)  # kept for the
+            # diagnosis repo session factory below
 
             async def _truncate() -> None:
-                await truncate_eval_runtime_state(_truncate_factory)
-                await _redis.flushdb()
+                # Intentionally a no-op; see comment above.
+                return None
 
             # Diagnosis repo — distinct session factory from the in-process
             # FastAPI app so the runner's polling doesn't fight the lifespan's
