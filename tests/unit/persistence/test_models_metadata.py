@@ -5,6 +5,7 @@ from sentinel.persistence.models import (
     Base,
     DeployModel,
     DiagnosisModel,
+    EvalCaseResultModel,
     EvalRunModel,
     IncidentModel,
     OutboxEventModel,
@@ -27,6 +28,7 @@ def test_all_tables_registered_on_base() -> None:
         "deploys",
         "runbooks",
         "eval_runs",
+        "eval_case_results",
         "outbox_events",
     }
     actual = set(Base.metadata.tables.keys())
@@ -67,8 +69,55 @@ def test_deploy_index_exists() -> None:
     assert "idx_deploys_service_time" in idx_names
 
 
-def test_eval_run_table_exists() -> None:
-    assert EvalRunModel.__tablename__ == "eval_runs"
+def test_eval_run_model_has_production_columns() -> None:
+    cols = {c.name for c in EvalRunModel.__table__.columns}
+    expected = {
+        "id",
+        "started_at",
+        "completed_at",
+        "status",
+        "trigger",
+        "git_sha",
+        "model",
+        "prompt_version",
+        "embedding_model_id",
+        "corpus_version",
+        "corpus_size",
+        "shots_per_case",
+        "fetcher_fixture_hash",
+        "metrics",
+        "metrics_stability",
+        "regression_baseline_sha",
+        "regression_passed",
+        "regression_detail",
+        "extra",
+    }
+    assert expected <= cols, f"missing columns: {expected - cols}"
+    assert "results" not in cols, "placeholder column should be gone"
+    assert "summary" not in cols, "placeholder column should be gone"
+
+
+def test_eval_case_result_model_exists() -> None:
+    assert EvalCaseResultModel.__tablename__ == "eval_case_results"
+    cols = {c.name for c in EvalCaseResultModel.__table__.columns}
+    expected = {
+        "id",
+        "run_id",
+        "case_id",
+        "shot_index",
+        "case_status",
+        "metrics",
+        "raw_response",
+        "diagnosis",
+        "incident_id",
+        "incident_fingerprint",
+        "incident_title",
+        "incident_severity",
+        "token_usage",
+        "latency_ms",
+        "error_detail",
+    }
+    assert expected <= cols, f"missing columns: {expected - cols}"
 
 
 def test_outbox_events_table_in_metadata() -> None:
