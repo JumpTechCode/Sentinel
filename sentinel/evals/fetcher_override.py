@@ -34,6 +34,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from sentinel.evals.registry import REGISTRY, ActiveCaseRegistry
 from sentinel.evals.schema import CorpusCase
 from sentinel.schemas.context import (
     DeployItem,
@@ -45,28 +46,6 @@ from sentinel.schemas.context import (
 )
 
 _FETCHER_TIMEOUT_S = 0.5  # arbitrary; CorpusFetchers never block on I/O
-
-
-class ActiveCaseRegistry:
-    """Per-process holder for the currently-active corpus case.
-
-    The runner sets the active case before POSTing each synthetic webhook;
-    the fetchers read it during the enrichment fan-out. NOT thread-safe —
-    the eval runner is single-threaded by design (the orchestrator fans out
-    via asyncio, not threads).
-    """
-
-    def __init__(self) -> None:
-        self._case: CorpusCase | None = None
-
-    def get(self) -> CorpusCase | None:
-        return self._case
-
-    def set(self, case: CorpusCase) -> None:
-        self._case = case
-
-    def clear(self) -> None:
-        self._case = None
 
 
 def _now() -> datetime:
@@ -226,7 +205,7 @@ class CorpusActiveAlertsFetcher:
 
 
 def corpus_fetchers(
-    registry: ActiveCaseRegistry,
+    registry: ActiveCaseRegistry = REGISTRY,
 ) -> tuple[
     CorpusDeploysFetcher,
     CorpusRelatedAlertsFetcher,
@@ -245,3 +224,16 @@ def corpus_fetchers(
         CorpusRecentLogsFetcher(registry),
         CorpusActiveAlertsFetcher(registry),
     )
+
+
+__all__ = [
+    "REGISTRY",
+    "ActiveCaseRegistry",
+    "CorpusActiveAlertsFetcher",
+    "CorpusDeploysFetcher",
+    "CorpusRecentLogsFetcher",
+    "CorpusRelatedAlertsFetcher",
+    "CorpusRunbooksFetcher",
+    "CorpusSimilarIncidentsFetcher",
+    "corpus_fetchers",
+]

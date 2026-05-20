@@ -12,7 +12,6 @@ from sentinel.evals.corpus_loader import (
     load_corpus_dir,
 )
 from sentinel.evals.fetcher_override import (
-    ActiveCaseRegistry,
     CorpusActiveAlertsFetcher,
     CorpusDeploysFetcher,
     CorpusRecentLogsFetcher,
@@ -21,6 +20,7 @@ from sentinel.evals.fetcher_override import (
     CorpusSimilarIncidentsFetcher,
     corpus_fetchers,
 )
+from sentinel.evals.registry import REGISTRY, ActiveCaseRegistry
 from sentinel.evals.schema import (
     AlertSeed,
     ContextSeed,
@@ -44,6 +44,7 @@ from sentinel.evals.scoring import (
 from sentinel.evals.stats import bootstrap_ci, regression_for_metric
 
 __all__ = [
+    "REGISTRY",
     "ActiveCaseRegistry",
     "AlertSeed",
     "CassetteContext",
