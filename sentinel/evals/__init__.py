@@ -1,5 +1,11 @@
 """Eval harness — corpus-driven scoring of diagnosis quality."""
 
+from sentinel.evals.cassette import (
+    CassetteContext,
+    CassetteMiss,
+    CassetteTransport,
+    compute_cassette_key,
+)
 from sentinel.evals.corpus_loader import (
     CorpusValidationError,
     load_case,
@@ -40,6 +46,9 @@ from sentinel.evals.stats import bootstrap_ci, regression_for_metric
 __all__ = [
     "ActiveCaseRegistry",
     "AlertSeed",
+    "CassetteContext",
+    "CassetteMiss",
+    "CassetteTransport",
     "ContextSeed",
     "CorpusActiveAlertsFetcher",
     "CorpusCase",
@@ -59,6 +68,7 @@ __all__ = [
     "RunbookSeed",
     "SimilarIncidentSeed",
     "bootstrap_ci",
+    "compute_cassette_key",
     "corpus_fetchers",
     "load_case",
     "load_corpus_dir",
