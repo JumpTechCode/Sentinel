@@ -39,6 +39,7 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import UUID as UUID_t
 
 import httpx
 from pydantic import SecretStr
@@ -410,10 +411,22 @@ async def _run_async(
             # session pool for connections.
             from sqlalchemy.ext.asyncio import async_sessionmaker
 
-            from sentinel.persistence.repositories import PostgresDiagnosisRepository
+            from sentinel.persistence.repositories import fetch_latest_diagnosis_for_eval
 
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
-            diagnosis_repo = PostgresDiagnosisRepository(session_factory)
+
+            # Eval-only DiagnosisLookup adapter — bridges the runner's protocol
+            # to a free function in persistence/ (the "real" get_by_incident_id
+            # method lands in PR 1 / #42). Removed during reconciliation once
+            # both PRs merge.
+            class _EvalDiagnosisLookup:
+                def __init__(self, sf: object) -> None:
+                    self._sf = sf
+
+                async def get_by_incident_id(self, incident_id: UUID_t) -> object:
+                    return await fetch_latest_diagnosis_for_eval(self._sf, incident_id)  # type: ignore[arg-type]
+
+            diagnosis_repo = _EvalDiagnosisLookup(session_factory)
 
             embed = FastEmbedProvider(
                 model_cache_dir=Path(settings.embedding_model_cache_dir),
@@ -444,11 +457,9 @@ async def _run_async(
 
             print(f"eval run starting: run_id={run_id} cases={len(cases)} shots={args.shots}")
 
-            # diagnosis_repo: PostgresDiagnosisRepository doesn't formally
-            # implement the runner's DiagnosisLookup protocol today (the prod
-            # interface lacks ``get_by_incident_id``). The Postgres impl will
-            # carry the method once PR 1 lands; cast for now so mypy passes
-            # without polluting the prod interface.
+            # diagnosis_repo: _EvalDiagnosisLookup (above) structurally satisfies
+            # DiagnosisLookup via fetch_latest_diagnosis_for_eval from
+            # persistence/. Cast to DiagnosisLookup for explicit typing.
             from typing import cast
 
             from sentinel.evals.runner import DiagnosisLookup
