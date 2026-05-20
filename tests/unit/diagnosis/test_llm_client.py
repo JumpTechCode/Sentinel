@@ -206,6 +206,25 @@ async def test_transport_exhaustion_raises_llm_transport() -> None:
     assert fake_inner.messages.stream.call_count == 2
 
 
+async def test_http_client_passthrough() -> None:
+    """An injected httpx.AsyncClient is forwarded to AsyncAnthropic on construction."""
+    from pydantic import SecretStr
+
+    fake_http_client = httpx.AsyncClient()
+    try:
+        with patch.object(llm_client_module, "AsyncAnthropic") as mock_cls:
+            AnthropicClient(
+                api_key=SecretStr("sk-fake"),
+                model="claude-sonnet-4-5",
+                timeout_s=10.0,
+                max_output_tokens=1024,
+                http_client=fake_http_client,
+            )
+        mock_cls.assert_called_once_with(api_key="sk-fake", http_client=fake_http_client)
+    finally:
+        await fake_http_client.aclose()
+
+
 async def test_no_tool_call_raises_llm_no_tool_call() -> None:
     """Message with no matching tool_use block raises LLMNoToolCall."""
     msg = _make_fake_message(include_tool_block=False)

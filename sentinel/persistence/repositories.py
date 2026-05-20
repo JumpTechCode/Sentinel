@@ -1425,6 +1425,22 @@ def _eval_run_record_from_model(row: EvalRunModel) -> EvalRunRecord:
     )
 
 
+async def truncate_eval_runtime_state(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """TRUNCATE the tables the eval runner accumulates between cases.
+
+    Eval-mode only. Used by sentinel.evals.cli before each case to clear
+    incidents/diagnoses/outbox so per-case persistence is isolated. Keeping
+    the raw SQL inside persistence/ honors the no-raw-SQL-outside-persistence
+    project invariant (enforced by tests/unit/persistence/test_no_raw_sql_outside.py).
+    """
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text("TRUNCATE incidents, diagnoses, outbox_events RESTART IDENTITY CASCADE")
+        )
+
+
 # Concrete classes for the stubbed Protocols above land with their consumers
 # (Work Areas G, H, K). Keeping the Protocols here means downstream modules
 # can depend on the interface without forcing the implementation now.
@@ -1454,4 +1470,5 @@ __all__ = [
     "RunbookRepository",
     "SimilarIncidentRow",
     "StoredEnrichmentContext",
+    "truncate_eval_runtime_state",
 ]

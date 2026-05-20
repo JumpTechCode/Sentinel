@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
@@ -95,6 +95,20 @@ class Settings(BaseSettings):
     pagerduty_webhook_secret: SecretStr | None = None
     datadog_webhook_secret: SecretStr | None = None
     generic_webhook_secret: SecretStr | None = None
+
+    # Eval harness (Work Area K) — off by default; runner CLI flips eval_mode.
+    eval_mode: bool = False
+    eval_corpus_dir: Path | None = None  # required when eval_mode=True
+    eval_cassette_dir: Path | None = None  # if set, AnthropicClient uses cassette transport
+
+    @model_validator(mode="after")
+    def _eval_mode_requires_corpus_dir(self) -> Settings:
+        """Fail loud at startup when eval_mode is on but no corpus dir is set."""
+        if self.eval_mode and self.eval_corpus_dir is None:
+            raise ValueError(
+                "eval_mode=True requires eval_corpus_dir to be set (SENTINEL_EVAL_CORPUS_DIR)"
+            )
+        return self
 
     @classmethod
     def settings_customise_sources(

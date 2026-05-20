@@ -12,7 +12,6 @@ from sentinel.evals.corpus_loader import (
     load_corpus_dir,
 )
 from sentinel.evals.fetcher_override import (
-    ActiveCaseRegistry,
     CorpusActiveAlertsFetcher,
     CorpusDeploysFetcher,
     CorpusRecentLogsFetcher,
@@ -20,6 +19,15 @@ from sentinel.evals.fetcher_override import (
     CorpusRunbooksFetcher,
     CorpusSimilarIncidentsFetcher,
     corpus_fetchers,
+)
+from sentinel.evals.registry import REGISTRY, ActiveCaseRegistry
+from sentinel.evals.report import write_report
+from sentinel.evals.runner import (
+    CaseStatus,
+    EvalCaseResultRecord,
+    RunnerDeps,
+    RunResult,
+    run_corpus,
 )
 from sentinel.evals.schema import (
     AlertSeed,
@@ -44,8 +52,10 @@ from sentinel.evals.scoring import (
 from sentinel.evals.stats import bootstrap_ci, regression_for_metric
 
 __all__ = [
+    "REGISTRY",
     "ActiveCaseRegistry",
     "AlertSeed",
+    "CaseStatus",
     "CassetteContext",
     "CassetteMiss",
     "CassetteTransport",
@@ -59,13 +69,16 @@ __all__ = [
     "CorpusSimilarIncidentsFetcher",
     "CorpusValidationError",
     "DeploySeed",
+    "EvalCaseResultRecord",
     "GroundTruth",
     "LogSeed",
     "MetricSet",
     "RegressionResult",
     "RegressionVerdict",
     "RelatedAlertSeed",
+    "RunResult",
     "RunbookSeed",
+    "RunnerDeps",
     "SimilarIncidentSeed",
     "bootstrap_ci",
     "compute_cassette_key",
@@ -73,8 +86,10 @@ __all__ = [
     "load_case",
     "load_corpus_dir",
     "regression_for_metric",
+    "run_corpus",
     "score_action_coverage",
     "score_category",
     "score_evidence_quality",
     "score_hypothesis",
+    "write_report",
 ]

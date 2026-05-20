@@ -8,7 +8,9 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import httpx
 from aiokafka import AIOKafkaConsumer
 from fastapi import FastAPI
 from redis.asyncio import Redis
@@ -36,6 +38,7 @@ from sentinel.enrichment.defaults import (
     NotConfiguredRunbookRetrieval,
     NotConfiguredSimilarIncidents,
 )
+from sentinel.enrichment.orchestrator import Fetcher
 from sentinel.ingestion.idempotency import RedisIdempotencyStore
 from sentinel.ingestion.kafka_producer import KafkaProducer
 from sentinel.ingestion.outbox_drainer import OUTBOX_MAX_ATTEMPTS, OutboxDrainer
@@ -59,6 +62,9 @@ from sentinel.persistence.repositories import (
     PostgresResolutionRepository,
 )
 from sentinel.persistence.session import make_async_engine, make_session_factory
+
+if TYPE_CHECKING:
+    from sentinel.evals.cassette import CassetteTransport
 
 log = logging.getLogger(__name__)
 
@@ -180,7 +186,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # drainer keeps shutdown ordering simple (enricher first, drainer second).
     deploy_repo = PostgresDeployRepository(session_factory)
 
-    fetchers = default_fetchers()
+    fetchers: tuple[Fetcher, ...]
+    if settings.eval_mode:
+        from sentinel.evals.fetcher_override import corpus_fetchers
+        from sentinel.evals.registry import REGISTRY
+
+        fetchers = corpus_fetchers(REGISTRY)
+    else:
+        fetchers = default_fetchers()
     breakers = {f.name: make_breaker(f.name) for f in fetchers}
 
     # ---- Memory (Phase 4) --------------------------------------------------
@@ -268,6 +281,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     diagnosis_task: asyncio.Task[None] | None = None
     diag_kafka_consumer: AIOKafkaConsumer | None = None
     diagnoser: DiagnosisConsumer | None = None
+    cassette_http_client: httpx.AsyncClient | None = None
+    cassette_transport: CassetteTransport | None = None
     if settings.diagnosis_consumer_enabled:
         diag_kafka_consumer = AIOKafkaConsumer(
             settings.kafka_topic_incidents,
@@ -277,11 +292,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             auto_offset_reset="earliest",
         )
 
+        if settings.eval_mode and settings.eval_cassette_dir is not None:
+            from sentinel.evals.cassette import CassetteTransport
+
+            cassette_transport = CassetteTransport(
+                mode="replay",
+                cassette_dir=settings.eval_cassette_dir,
+            )
+            cassette_http_client = httpx.AsyncClient(transport=cassette_transport)
+
         llm_client = AnthropicClient(
             api_key=settings.anthropic_api_key,
             model=settings.anthropic_model,
             timeout_s=settings.diagnosis_llm_timeout_seconds,
             max_output_tokens=settings.diagnosis_max_output_tokens,
+            http_client=cassette_http_client,
         )
         prompt_bundle = PromptBundle.load(settings.diagnosis_prompt_version)
         diagnosis_repo = PostgresDiagnosisRepository(session_factory)
@@ -307,6 +332,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.consumer_alive["diagnosis"] = True
         diagnosis_task.add_done_callback(_on_consumer_task_done("diagnosis", app))
         app.state.diagnosis_consumer = diagnoser
+    elif settings.eval_mode:
+        # Eval mode requires a diagnosis consumer to wrap the LLM client with
+        # the cassette transport. Without it, the runner has no AnthropicClient
+        # to drive — surface this as a loud warning rather than failing silently.
+        log.warning(
+            "eval_mode_skipping_cassette_wiring",
+            extra={"reason": "diagnosis_consumer_enabled=False"},
+        )
+
+    # Stashed unconditionally (None when not eval mode or no cassette dir) so
+    # the runner can rely on `app.state.cassette_transport` existing.
+    app.state.cassette_transport = cassette_transport
 
     handler = WebhookHandler(
         incident_repo=incident_repo,
@@ -353,6 +390,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 pass
             with contextlib.suppress(Exception):
                 await diag_kafka_consumer.stop()
+
+        # Cassette-wrapped httpx client is owned by lifespan when constructed;
+        # close it after the diagnosis consumer (which holds the AnthropicClient
+        # that uses it) has stopped to avoid in-flight request cancellation.
+        if cassette_http_client is not None:
+            with contextlib.suppress(Exception):
+                await cassette_http_client.aclose()
 
         if (
             memory_consumer is not None
