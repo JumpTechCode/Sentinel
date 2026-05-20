@@ -26,6 +26,17 @@ COPY alembic.ini ./
 RUN pip install --upgrade pip wheel \
  && pip install -e .
 
+# Pre-download fastembed model so first container start is offline-fast.
+ENV SENTINEL_EMBEDDING_MODEL_CACHE_DIR=/var/cache/fastembed
+RUN python -c "from fastembed import TextEmbedding; \
+               TextEmbedding(model_name='BAAI/bge-large-en-v1.5', cache_dir='/var/cache/fastembed')" \
+ && chown -R sentinel:sentinel /var/cache/fastembed
+
+# Pre-create the LLM audit log directory so the non-root user can write to it.
+# (Default Settings.llm_audit_log_path is `logs/llm-audit.log`, resolved relative
+# to WORKDIR /app.)
+RUN mkdir -p /app/logs && chown sentinel:sentinel /app/logs
+
 USER sentinel
 
 # Single entrypoint: the API process owns HTTP plus the in-process Kafka consumers.

@@ -41,6 +41,13 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
       KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       CLUSTER_ID: "5L6g3nShT-eMCtK--X86sw"
+      # Single-broker KRaft: __consumer_offsets and __transaction_state can't
+      # achieve the default replication factor of 3, so creation hangs and
+      # FindCoordinator returns NOT_AVAILABLE forever (gh#36). Force RF=1.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
     ports:
       - "9092:9092"
       - "29092:29092"

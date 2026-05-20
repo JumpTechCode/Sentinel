@@ -51,6 +51,14 @@ class ResolveIncidentRequest(BaseModel):
     resolved_by: str | None = None
 
 
+class ResolveIncidentResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    incident_id: UUID
+    status: Literal["resolved"]
+    resolved_at: datetime
+    event_id: UUID  # staged `incident.resolved` outbox event_id
+
+
 class IncidentListItem(BaseModel):
     model_config = ConfigDict(frozen=True)
     id: UUID

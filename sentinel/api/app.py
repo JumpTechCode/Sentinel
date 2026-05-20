@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from aiokafka import AIOKafkaConsumer
 from fastapi import FastAPI
@@ -14,6 +15,7 @@ from redis.asyncio import Redis
 
 from sentinel import __version__
 from sentinel.api.routes.health import router as health_router
+from sentinel.api.routes.resolve import router as resolve_router
 from sentinel.api.routes.webhooks import router as webhooks_router
 from sentinel.config.settings import load_settings
 from sentinel.diagnosis.agent import diagnose as diagnose_fn
@@ -38,7 +40,15 @@ from sentinel.ingestion.idempotency import RedisIdempotencyStore
 from sentinel.ingestion.kafka_producer import KafkaProducer
 from sentinel.ingestion.outbox_drainer import OUTBOX_MAX_ATTEMPTS, OutboxDrainer
 from sentinel.ingestion.webhook import WebhookHandler
+from sentinel.memory import (
+    FastEmbedProvider,
+    MemoryConsumer,
+    MemoryConsumerDeps,
+    MemoryPipeline,
+    PgVectorIncidentStore,
+)
 from sentinel.observability.llm_audit import LLMAuditLogger
+from sentinel.observability.metrics import consumer_crashed_total
 from sentinel.observability.tracing import configure_tracing
 from sentinel.persistence.repositories import (
     OutboxRepository,
@@ -46,10 +56,88 @@ from sentinel.persistence.repositories import (
     PostgresDiagnosisRepository,
     PostgresIncidentRepository,
     PostgresOutboxRepository,
+    PostgresResolutionRepository,
 )
 from sentinel.persistence.session import make_async_engine, make_session_factory
 
 log = logging.getLogger(__name__)
+
+
+async def _start_then_run(
+    kafka: AIOKafkaConsumer,
+    run: Callable[[], Awaitable[None]],
+    name: str,
+) -> None:
+    """Start an aiokafka consumer and then drive its wrapper's `run()` loop.
+
+    Calling `AIOKafkaConsumer.start()` directly inside `lifespan` blocks until
+    the broker is reachable AND a group coordinator is found. On a freshly
+    booted Kafka container the coordinator can take 30s+ to provision, during
+    which `FindCoordinator` retries silently (gh#36). Wrapping start+run in a
+    background task lets `lifespan` return immediately so `/healthz` is ready
+    while the consumer comes online in the background.
+
+    Exceptions from `start()` and `run()` both propagate out of this coroutine
+    so the asyncio.Task carries the failure — a `task.add_done_callback`
+    attached in `lifespan` observes `task.exception()` and flips the
+    per-consumer aliveness flag exposed via `/readyz`. Swallowing here would
+    make `task.exception()` return None and silently lose the failure.
+    Cancellation (graceful shutdown) propagates as `CancelledError`.
+    """
+    try:
+        await kafka.start()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("kafka_consumer_start_failed", extra={"consumer": name})
+        raise
+    await run()
+
+
+def _on_consumer_task_done(
+    name: str,
+    app: FastAPI,
+) -> Callable[[asyncio.Task[None]], None]:
+    """Build a done-callback that records consumer death.
+
+    Consumer tasks exit under three conditions:
+
+    1. **Cancelled** — graceful shutdown via task.cancel(). No-op.
+    2. **Clean return during shutdown** — `consumer.run()` saw its `_stop`
+       flag set and returned cleanly. No-op (gated on `app.state.shutting_down`
+       which the lifespan finally-block sets before calling `consumer.stop()`).
+       Without this gate, every graceful shutdown would spam the crash metric
+       and ERROR-log three lines per restart, destroying the signal value of
+       `sentinel_consumer_crashed_total`.
+    3. **Anything else** — start failure, run-loop crash past the inner
+       `except Exception`, or a clean return outside shutdown (a bug in the
+       consumer wrapper). All three are operationally a wedged stream:
+       flip aliveness, bump the crash counter, log ERROR with exc_info.
+    """
+
+    def _callback(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        if getattr(app.state, "shutting_down", False):
+            return
+        alive = getattr(app.state, "consumer_alive", None)
+        if isinstance(alive, dict):
+            alive[name] = False
+        consumer_crashed_total.labels(consumer=name).inc()
+        exc = task.exception()
+        if exc is not None:
+            log.error(
+                "kafka_consumer_task_crashed",
+                extra={"consumer": name},
+                exc_info=exc,
+            )
+        else:
+            log.error(
+                "kafka_consumer_task_exited_unexpectedly",
+                extra={"consumer": name},
+            )
+
+    return _callback
 
 
 @asynccontextmanager
@@ -61,6 +149,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     session_factory = make_session_factory(engine)
     incident_repo = PostgresIncidentRepository(session_factory)
     outbox_repo = PostgresOutboxRepository(session_factory)
+
+    # Resolve route deps (independent of memory_consumer_enabled).
+    resolution_repo = PostgresResolutionRepository(session_factory)
+    app.state.resolution_repo = resolution_repo
+    app.state.outbox_topic = settings.kafka_topic_incidents
+
+    # Aliveness map for background Kafka consumers. Populated below per-stream
+    # and flipped to False by `_on_consumer_task_done` if the task dies. /readyz
+    # returns 503 if any entry is False or if the dict is missing/empty so
+    # readiness gates don't route traffic to a pod that's lost a consumer.
+    app.state.consumer_alive = {}
+    # Shutdown gate read by `_on_consumer_task_done`: a clean `run()` return
+    # while shutting_down is True is the expected outcome of `consumer.stop()`
+    # and must NOT be counted as a crash.
+    app.state.shutting_down = False
 
     redis = Redis.from_url(settings.redis_url)
     idempotency = RedisIdempotencyStore(redis)
@@ -80,12 +183,54 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     fetchers = default_fetchers()
     breakers = {f.name: make_breaker(f.name) for f in fetchers}
 
+    # ---- Memory (Phase 4) --------------------------------------------------
+    memory_consumer: MemoryConsumer | None = None
+    memory_task: asyncio.Task[None] | None = None
+    mem_kafka_consumer: AIOKafkaConsumer | None = None
+    similar_incidents_store: PgVectorIncidentStore | NotConfiguredSimilarIncidents = (
+        NotConfiguredSimilarIncidents()
+    )
+
+    if settings.memory_consumer_enabled:
+        embedding_provider = FastEmbedProvider(
+            model_cache_dir=Path(settings.embedding_model_cache_dir),
+            compute_timeout_s=settings.embedding_compute_timeout_seconds,
+        )
+
+        # CORRECTED constructor (Task 5 refactored to repo-delegation):
+        similar_incidents_store = PgVectorIncidentStore(
+            incident_repo=incident_repo,
+            embedding_provider=embedding_provider,
+        )
+
+        mem_kafka_consumer = AIOKafkaConsumer(
+            settings.kafka_topic_incidents,
+            bootstrap_servers=settings.kafka_brokers,
+            group_id=settings.kafka_consumer_group_memory,
+            enable_auto_commit=False,
+            auto_offset_reset="earliest",
+        )
+
+        memory_deps = MemoryConsumerDeps(
+            incident_repo=incident_repo,
+            embedding_provider=embedding_provider,
+            pipeline=MemoryPipeline(),
+        )
+        memory_consumer = MemoryConsumer(consumer=mem_kafka_consumer, deps=memory_deps)
+        memory_task = asyncio.create_task(
+            _start_then_run(mem_kafka_consumer, memory_consumer.run, "memory-consumer"),
+            name="memory-consumer",
+        )
+        app.state.consumer_alive["memory"] = True
+        memory_task.add_done_callback(_on_consumer_task_done("memory", app))
+        app.state.memory_consumer = memory_consumer
+
     enrich_deps = EnrichmentDeps(
         fetchers=fetchers,
         breakers=breakers,
         incident_repo=incident_repo,
         deploy_repo=deploy_repo,
-        similar_incidents=NotConfiguredSimilarIncidents(),
+        similar_incidents=similar_incidents_store,
         runbooks=NotConfiguredRunbookRetrieval(),
         log_search=NotConfiguredLogSearch(),
         active_alerts=NotConfiguredActiveAlerts(),
@@ -98,7 +243,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         enable_auto_commit=False,
         auto_offset_reset="earliest",
     )
-    await kafka_consumer.start()
     enricher = EnrichmentConsumer(
         consumer=kafka_consumer,
         deps=enrich_deps,
@@ -106,7 +250,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         topic=settings.kafka_topic_incidents,
         enriched_topic=settings.kafka_topic_incidents,
     )
-    enricher_task = asyncio.create_task(enricher.run(), name="enrichment-consumer")
+    enricher_task = asyncio.create_task(
+        _start_then_run(kafka_consumer, enricher.run, "enrichment-consumer"),
+        name="enrichment-consumer",
+    )
+    app.state.consumer_alive["enrichment"] = True
+    enricher_task.add_done_callback(_on_consumer_task_done("enrichment", app))
     app.state.enrichment_consumer = enricher
 
     # ---- Diagnosis ---------------------------------------------------------
@@ -126,7 +275,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             enable_auto_commit=False,
             auto_offset_reset="earliest",
         )
-        await diag_kafka_consumer.start()
 
         llm_client = AnthropicClient(
             api_key=settings.anthropic_api_key,
@@ -151,7 +299,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             deps=diagnosis_deps,
             agent_fn=diagnose_fn,
         )
-        diagnosis_task = asyncio.create_task(diagnoser.run(), name="diagnosis-consumer")
+        diagnosis_task = asyncio.create_task(
+            _start_then_run(diag_kafka_consumer, diagnoser.run, "diagnosis-consumer"),
+            name="diagnosis-consumer",
+        )
+        app.state.consumer_alive["diagnosis"] = True
+        diagnosis_task.add_done_callback(_on_consumer_task_done("diagnosis", app))
         app.state.diagnosis_consumer = diagnoser
 
     handler = WebhookHandler(
@@ -170,12 +323,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Flip the shutdown gate BEFORE calling any consumer.stop(): once
+        # consumer.stop() lands, run() may return cleanly within the same event
+        # loop tick, firing the done_callback. Without `shutting_down=True`
+        # set first, that clean return would be mis-counted as a crash.
+        app.state.shutting_down = True
+
         # Shutdown sequence: diagnoser and enricher first (both consume from
         # Kafka and may write rows via repos), then drainer (stops claiming new
         # outbox rows), then producer/redis/engine in parallel via gather. We
         # collect exceptions so a failure in one cleanup doesn't mask the
         # others — graceful shutdown means *all* resources get a chance to
         # release.
+        # Consumer tasks may already be `done()` with an exception (start
+        # failure or run-loop crash, surfaced via `_on_consumer_task_done`).
+        # `await`ing such a task re-raises that exception — the done_callback
+        # has already logged it and bumped `consumer_crashed_total`, so we
+        # suppress here to keep cleanup going.
         if diagnoser is not None and diagnosis_task is not None and diag_kafka_consumer is not None:
             diagnoser.stop()
             try:
@@ -184,8 +348,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 diagnosis_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await diagnosis_task
+            except Exception:  # noqa: S110 — done_callback already logged + bumped crash metric
+                pass
             with contextlib.suppress(Exception):
                 await diag_kafka_consumer.stop()
+
+        if (
+            memory_consumer is not None
+            and memory_task is not None
+            and mem_kafka_consumer is not None
+        ):
+            memory_consumer.stop()
+            try:
+                await asyncio.wait_for(memory_task, timeout=5.0)
+            except TimeoutError:
+                memory_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await memory_task
+            except Exception:  # noqa: S110 — done_callback already logged + bumped crash metric
+                pass
+            with contextlib.suppress(Exception):
+                await mem_kafka_consumer.stop()
 
         enricher.stop()
         try:
@@ -194,6 +377,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             enricher_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await enricher_task
+        except Exception:  # noqa: S110 — done_callback already logged + bumped crash metric
+            pass
         with contextlib.suppress(Exception):
             await kafka_consumer.stop()
 
@@ -264,6 +449,7 @@ def build_app() -> FastAPI:
     )
     app.include_router(health_router)
     app.include_router(webhooks_router)
+    app.include_router(resolve_router)
     return app
 
 

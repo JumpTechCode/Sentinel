@@ -93,6 +93,9 @@ postgres-data/
 redis-data/
 kafka-data/
 
+# Test model cache (fastembed downloads ~400MB ONNX models here)
+.test-model-cache/
+
 # Node / frontend (Next.js UI)
 node_modules/
 .next/

@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     diagnosis_llm_timeout_seconds: float = 30.0
     kafka_consumer_group_diagnoser: str = "sentinel-diagnoser"
 
+    # Memory & embeddings (Work Area H)
+    embedding_model_name: str = "BAAI/bge-large-en-v1.5"
+    embedding_model_cache_dir: str = "/var/cache/fastembed"
+    embedding_compute_timeout_seconds: float = 5.0
+    kafka_consumer_group_memory: str = "sentinel-memory"
+    memory_consumer_enabled: bool = True
+
     # Observability
     log_level: str = "INFO"
     otel_endpoint: str | None = None
