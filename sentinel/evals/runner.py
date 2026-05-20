@@ -314,11 +314,23 @@ async def _fire_and_poll(
       * ``timeout`` → incident_id is known, diagnosis is None
       * ``ok`` → both populated
     """
-    raw_payload = case.alert.raw_payload
+    # Merge the corpus alert fields (id/service/title/severity) into the
+    # webhook body — the GenericAdapter (and the other source adapters) require
+    # these as top-level fields in the POSTed payload, but the corpus YAML
+    # carries them as a separate `alert.*` block (cleaner curation), with
+    # `raw_payload` reserved for supplementary monitoring data. Without the
+    # merge the adapter rejects with 422 ("missing required fields").
+    payload: dict[str, object] = {
+        "id": case.id,
+        "service": case.alert.service,
+        "severity": case.alert.severity,
+        "title": case.alert.title,
+        **case.alert.raw_payload,
+    }
     # Serialize ourselves and POST the exact bytes we sign — the alternative
-    # (json=raw_payload) lets httpx pick separators that may differ from what
+    # (json=payload) lets httpx pick separators that may differ from what
     # the adapter recomputes the HMAC over, causing 401 with no diagnostic.
-    body_bytes = json.dumps(raw_payload).encode()
+    body_bytes = json.dumps(payload).encode()
     hex_sig = compute_hmac_sha256(body_bytes, deps.webhook_secret.get_secret_value().encode())
     headers = _signature_headers_for_source(case.alert.source, hex_sig)
     headers["Content-Type"] = "application/json"
