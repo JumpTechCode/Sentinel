@@ -1,0 +1,65 @@
+id: fastly-2021-06-08-config
+corpus_version: 1
+source_url: https://www.fastly.com/blog/summary-of-june-8-outage
+sources_consulted:
+  - https://www.fastly.com/blog/summary-of-june-8-outage
+notes: >
+  A software bug shipped May 12 lay dormant until a customer pushed a valid
+  configuration change on June 8 that activated it, collapsing 85% of Fastly's
+  global edge network for ~50 minutes.
+alert:
+  source: generic
+  service: fastly-edge
+  severity: SEV1
+  title: "Global edge POPs returning 503 — 85% of network unhealthy"
+  timestamp: "2021-06-08T09:47:00Z"
+  raw_payload:
+    check: global_pop_health
+    healthy_pct: 15
+    error_rate_pct: 85
+    http_status: 503
+    regions_affected: global
+    alert_id: "fdly-20210608-001"
+context_seed:
+  deploys:
+    - id: deploy:may-12-bug
+      service: fastly-edge
+      sha: a3f91c2
+      pr_title: "Edge config parser: extend VCL condition handling"
+      pr_diff_summary: >
+        Modified edge software to extend support for specific VCL configuration
+        conditions; introduced a latent bug that could be activated by a
+        particular customer configuration pattern under specific runtime
+        circumstances.
+      deployed_at: "2021-05-12T00:00:00Z"
+  recent_logs:
+    - id: log:1
+      timestamp: "2021-06-08T09:47:12Z"
+      level: error
+      service: fastly-edge
+      message: "POP health check failed: 503 returned on >80% of edge nodes globally"
+    - id: log:2
+      timestamp: "2021-06-08T09:48:05Z"
+      level: error
+      service: fastly-edge
+      message: "Customer config push accepted; edge software entered fault state across distributed POPs"
+    - id: log:3
+      timestamp: "2021-06-08T10:27:00Z"
+      level: info
+      service: fastly-edge
+      message: "Identified triggering customer configuration; initiating rollback and disable"
+ground_truth:
+  category: config
+  acceptable_categories:
+    - config
+    - deploy
+  root_cause: >
+    A software bug introduced in the May 12 deploy lay dormant until June 8,
+    when a customer pushed a valid configuration change that matched the
+    specific conditions required to trigger it, causing 85% of Fastly's global
+    edge network to return errors. The bug and the config change are co-causal:
+    neither alone would have caused the outage.
+  correct_actions:
+    - Identify and disable the triggering customer configuration to restore edge health
+    - Roll back or hotfix the May 12 edge software deploy to eliminate the latent bug
+    - Harden pre-deploy testing to catch configuration-triggered latent faults

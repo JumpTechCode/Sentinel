@@ -1,0 +1,71 @@
+id: slack-2021-01-04-dns
+corpus_version: 1
+source_url: https://slack.engineering/slacks-outage-on-january-4th-2021/
+sources_consulted:
+  - https://slack.engineering/slacks-outage-on-january-4th-2021/
+notes: >
+  Post-holiday cold caches caused unusual traffic surge that saturated an AWS
+  Transit Gateway, cascading into packet loss, broken DNS/Consul, failed
+  autoscaling, and a ~3-hour outage affecting all Slack services.
+alert:
+  source: generic
+  service: slack-api
+  severity: SEV1
+  title: "Slack API error rate >40% across all regions; Consul service discovery returning empty sets"
+  timestamp: "2021-01-04T15:00:00Z"
+  raw_payload:
+    error_rate_pct: 42.7
+    affected_regions: [us-east-1, us-west-2, eu-west-1]
+    symptom: "connection timeouts and DNS NXDOMAIN across internal services"
+    web_tier_5xx_rate: 0.41
+    consul_healthy_instances: 0
+    triggered_by: threshold_breach
+context_seed:
+  deploys: []
+  recent_logs:
+    - id: log:1
+      timestamp: "2021-01-04T14:57:00Z"
+      level: error
+      service: slack-api
+      message: "DNS resolution failed for consul.internal: SERVFAIL (upstream timeout)"
+    - id: log:2
+      timestamp: "2021-01-04T14:58:00Z"
+      level: error
+      service: provision-service
+      message: "Too many open files: cannot open new socket for instance bootstrap"
+    - id: log:3
+      timestamp: "2021-01-04T15:01:00Z"
+      level: warning
+      service: autoscaler
+      message: "Web tier scale-out requested 1200 new instances; provision-service unreachable over degraded network"
+    - id: log:4
+      timestamp: "2021-01-04T15:02:00Z"
+      level: error
+      service: observability
+      message: "Dashboard backend unavailable: Transit Gateway packet loss >30% to database VPC"
+    - id: log:5
+      timestamp: "2021-01-04T15:05:00Z"
+      level: error
+      service: slack-api
+      message: "AWS autoscaling-group size limit reached; broken instances accumulating in web tier"
+ground_truth:
+  category: external
+  acceptable_categories:
+    - external
+    - dependency
+  root_cause: >
+    An AWS Transit Gateway became overloaded when post-holiday cold client
+    caches generated an unusual traffic surge on the first business day of 2021.
+    TGW saturation caused cross-VPC packet loss, breaking DNS and Consul
+    service discovery across all AZs. Autoscaling failed to recover the web
+    tier because the provision-service itself depended on the degraded network,
+    and Linux open-file limits plus an AWS quota cap caused broken instances to
+    accumulate, exhausting the autoscaling group size limit.
+  correct_actions:
+    - "Contact AWS support to manually increase Transit Gateway capacity"
+    - "Enable load balancer panic mode to route traffic past failing health checks"
+    - "Halt autoscaling scale-out until provision-service connectivity is confirmed healthy"
+    - "Move dashboard/observability instances into the same VPC as their databases to eliminate TGW dependency"
+    - "Raise Linux open-files ulimit on provision-service hosts"
+    - "Request preemptive TGW upscaling before future post-holiday traffic surges"
+    - "Load-test provision-service under degraded network conditions"

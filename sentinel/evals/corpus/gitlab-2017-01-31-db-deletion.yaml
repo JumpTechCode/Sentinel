@@ -1,0 +1,83 @@
+id: gitlab-2017-01-31-db-deletion
+corpus_version: 1
+source_url: https://about.gitlab.com/blog/postmortem-of-database-outage-of-january-31/
+sources_consulted:
+  - https://about.gitlab.com/blog/postmortem-of-database-outage-of-january-31/
+notes: >
+  Engineer (YP) ran rm -rf on the production PostgreSQL data directory (~300 GB)
+  while intending to wipe the secondary. All 5 backup mechanisms failed silently,
+  leaving only a 6-hour-old LVM staging snapshot for recovery.
+alert:
+  source: generic
+  service: gitlab-postgres
+  severity: SEV1
+  title: "GitLab.com unavailable — PostgreSQL data directory unexpectedly empty on primary"
+  timestamp: "2017-01-31T23:31:00Z"
+  raw_payload:
+    check: postgres_data_dir_present
+    host: db1.gitlab.com
+    role: primary
+    data_dir: /var/opt/gitlab/postgresql/data
+    data_dir_size_bytes: 0
+    pg_is_ready: false
+    http_status: 502
+    alert_id: "pagerduty-20170131-2331"
+context_seed:
+  deploys: []
+  recent_logs:
+    - id: log:1
+      timestamp: "2017-01-31T23:00:00Z"
+      level: critical
+      service: gitlab-postgres
+      message: "Replication lag: primary removed WAL segments before secondary could consume them; replica falling behind"
+    - id: log:2
+      timestamp: "2017-01-31T23:05:00Z"
+      level: warning
+      service: gitlab-postgres
+      message: "max_wal_senders increased from 3 to 32 to unblock pg_basebackup replication sync (config change)"
+    - id: log:3
+      timestamp: "2017-01-31T23:10:00Z"
+      level: warning
+      service: gitlab-postgres
+      message: "max_connections reduced from 8000 to 2000 after semaphore creation errors (config change)"
+    - id: log:4
+      timestamp: "2017-01-31T23:20:00Z"
+      level: error
+      service: gitlab-postgres
+      message: "pg_basebackup hung with no output; strace shows blocked on network I/O to primary"
+    - id: log:5
+      timestamp: "2017-01-31T23:31:00Z"
+      level: critical
+      service: gitlab-postgres
+      message: "rm -rf executed on primary data directory /var/opt/gitlab/postgresql/data; ~300 GB removed before process terminated"
+    - id: log:6
+      timestamp: "2017-01-31T23:35:00Z"
+      level: critical
+      service: gitlab-web
+      message: "HTTP 502 across all GitLab.com frontends; PostgreSQL primary unreachable"
+    - id: log:7
+      timestamp: "2017-01-31T23:50:00Z"
+      level: error
+      service: backup-runner
+      message: "pg_dump failed silently: binary version 9.2 incompatible with running server 9.6; failure emails dropped (missing DMARC signing)"
+ground_truth:
+  category: data
+  acceptable_categories:
+    - data
+  root_cause: >
+    An engineer accidentally ran rm -rf on the primary PostgreSQL data directory
+    (~300 GB) while intending to target the secondary during a manual replication
+    resync. Recovery was prolonged because all five backup mechanisms had failed
+    silently: pg_dump used a mismatched binary (9.2 vs 9.6), Azure disk snapshots
+    were not enabled, LVM snapshots were taken only for staging, WAL archiving was
+    inactive, and backup-failure alert emails were dropped due to missing DMARC
+    signing. The only viable restore source was a 6-hour-old LVM staging snapshot.
+  correct_actions:
+    - "Restore from most recent LVM snapshot (6 h old) to minimise data loss window"
+    - "Copy staging database to production over available Azure link as fallback"
+    - "Increment all database sequences by a large offset to prevent ID reuse after partial restore"
+    - "Enable Azure disk snapshots on all database servers immediately"
+    - "Fix pg_dump binary version mismatch and verify backup integrity with automated restore tests"
+    - "Enable WAL archiving (e.g. WAL-E/pgBackRest) for point-in-time recovery"
+    - "Route backup failure notifications through verified, DMARC-signed mail to ensure operator visibility"
+    - "Implement runbook requiring double-confirmation and peer review before rm operations on database hosts"

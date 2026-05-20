@@ -1,0 +1,75 @@
+id: atlassian-2022-04-04-deletion
+corpus_version: 1
+source_url: https://www.atlassian.com/engineering/post-incident-review-april-2022-outage
+sources_consulted:
+  - https://www.atlassian.com/engineering/post-incident-review-april-2022-outage
+notes: >
+  Atlassian maintenance script received full cloud site IDs instead of Insight
+  app-instance IDs; the deletion API accepted both without validation,
+  permanently destroying 883 sites across 775 customers. Full recovery took
+  14 days.
+alert:
+  source: generic
+  service: atlassian-cloud-platform
+  severity: SEV1
+  title: "Mass site-not-found errors: 800+ Jira/Confluence tenants unreachable"
+  timestamp: "2022-04-05T08:17:00Z"
+  raw_payload:
+    error_rate_pct: 100
+    affected_sites_count: 883
+    error_code: "SITE_NOT_FOUND"
+    products_impacted:
+      - jira-software
+      - confluence
+      - jira-service-management
+    region: global
+    detection_source: customer-support-spike
+context_seed:
+  deploys:
+    - id: deploy:insight-cleanup-script
+      service: atlassian-cloud-platform
+      sha: a3f91c2
+      pr_title: "Decommission standalone Insight app instances for deprecated tenants"
+      pr_diff_summary: >
+        Adds script to call internal site-management deletion API for a provided
+        list of IDs. List was intended to contain Insight app-instance IDs;
+        peer review verified the correct API endpoint but did not cross-check
+        whether the supplied IDs referred to app instances or full cloud sites.
+      deployed_at: "2022-04-05T07:38:00Z"
+  recent_logs:
+    - id: log:1
+      timestamp: "2022-04-05T07:45:00Z"
+      level: critical
+      service: atlassian-cloud-platform
+      message: "site_deletion_api: completed deletion for site_id=AAA-1193; type=FULL_SITE"
+    - id: log:2
+      timestamp: "2022-04-05T08:01:00Z"
+      level: critical
+      service: atlassian-cloud-platform
+      message: "insight-cleanup-script: finished; 883 records deleted (expected: app instances)"
+    - id: log:3
+      timestamp: "2022-04-05T08:05:00Z"
+      level: error
+      service: atlassian-cloud-platform
+      message: "support-portal: ticket submission failures — customer site IDs not resolving"
+ground_truth:
+  category: data
+  acceptable_categories:
+    - data
+    - deploy
+  root_cause: >
+    A maintenance script intended to delete deprecated Insight app instances was
+    executed with a list of full cloud site IDs instead of app-instance IDs. The
+    deletion API accepted both identifier types without validation or warning,
+    causing 883 complete customer sites to be permanently deleted. A peer-review
+    process verified the correct API endpoint but did not cross-check whether
+    the provided IDs referred to app instances or entire sites, and no
+    soft-delete or rollback protection existed in production.
+  correct_actions:
+    - Halt the deletion script immediately and preserve all execution logs
+    - Declare SEV1 and activate major incident process with executive notification
+    - Identify full list of affected site IDs from deletion API audit logs
+    - Initiate site restoration from hourly backups (RPO 5 minutes before deletion)
+    - Implement soft-delete gate on site-management API before any further maintenance runs
+    - Establish dedicated customer communication channel for affected accounts
+    - Conduct blameless post-incident review covering API input validation, peer-review checklist, and disaster-recovery automation gaps

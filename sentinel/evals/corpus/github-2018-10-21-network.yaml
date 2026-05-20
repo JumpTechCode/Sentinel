@@ -1,0 +1,67 @@
+id: github-2018-10-21-network
+corpus_version: 1
+source_url: https://github.blog/news-insights/company-news/oct21-post-incident-analysis/
+sources_consulted:
+  - https://github.blog/news-insights/company-news/oct21-post-incident-analysis/
+  - https://github.com/openark/orchestrator/blob/master/docs/topology-recovery.md
+notes: >
+  A 43-second network partition during routine optical-equipment replacement
+  caused Orchestrator (Raft mode) to promote a West Coast MySQL primary,
+  creating bidirectional write divergence that required ~24 hours of backup
+  restoration and manual topology reconciliation to resolve.
+alert:
+  source: generic
+  service: github-db
+  severity: SEV1
+  title: "MySQL replication broken across all clusters — unexpected primary topology detected"
+  timestamp: "2018-10-21T22:54:00Z"
+  raw_payload:
+    alert_name: mysql_replication_lag_critical
+    affected_clusters: 8
+    replication_lag_seconds: 9999
+    region: us-east
+    orchestrator_state: failover_in_progress
+    data_center_connectivity: degraded
+context_seed:
+  deploys: []
+  recent_logs:
+    - id: log:1
+      timestamp: "2018-10-21T22:52:17Z"
+      level: error
+      service: network-core
+      message: "100G optical link us-east hub → primary DC: link down (carrier loss)"
+    - id: log:2
+      timestamp: "2018-10-21T22:52:19Z"
+      level: warning
+      service: orchestrator
+      message: "Raft quorum: us-west + cloud nodes achieved majority; us-east primary unreachable"
+    - id: log:3
+      timestamp: "2018-10-21T22:52:55Z"
+      level: error
+      service: orchestrator
+      message: "Initiating cross-region failover: promoting us-west replica to primary (all clusters)"
+    - id: log:4
+      timestamp: "2018-10-21T22:54:33Z"
+      level: error
+      service: github-db
+      message: "Replication topology mismatch: us-east servers contain unreplicated writes not present on new primary"
+    - id: log:5
+      timestamp: "2018-10-21T23:02:10Z"
+      level: warning
+      service: db-engineering
+      message: "Split-brain confirmed: 954 writes on busy cluster unreplicated; bidirectional divergence accumulating"
+ground_truth:
+  category: dependency
+  acceptable_categories:
+    - dependency
+    - data
+  root_cause: >
+    A 43-second network partition caused Orchestrator's Raft-based consensus
+    to promote US West Coast MySQL replicas to primary, while US East Coast
+    servers held a small window of unreplicated writes; the resulting
+    bidirectional write divergence required ~24 hours of backup restoration
+    and manual topology reconciliation to resolve without data loss.
+  correct_actions:
+    - Restore East Coast MySQL clusters from backup and resync replication from West Coast primaries before failing back
+    - Reconfigure Orchestrator to prohibit cross-regional primary promotion during network partitions
+    - Implement active/active/active multi-datacenter architecture so no single partition forces a cross-region failover

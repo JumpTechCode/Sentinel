@@ -1,0 +1,95 @@
+id: stripe-2019-07-10-db-failover
+corpus_version: 1
+source_url: https://stripe.com/blog/changing-the-tires
+sources_consulted:
+  - https://stripe.com/blog/changing-the-tires
+  - https://stripe.com/blog/online-migrations
+notes: >
+  Stripe's primary database cluster was operating near its workload ceiling.
+  A planned replica promotion under sustained load triggered cascading
+  replication lag and repeated API degradations across July 2019, culminating
+  in the July 10 SEV1. The fix required live infrastructure re-architecture
+  while the system stayed in production — hence "changing the tires."
+alert:
+  source: generic
+  service: stripe-charges-api
+  severity: SEV1
+  title: "Charges API p99 latency >10 s — elevated error rate on /v1/charges"
+  timestamp: "2019-07-10T16:00:00Z"
+  raw_payload:
+    check: charges_api_p99_latency
+    threshold_ms: 2000
+    observed_ms: 11400
+    error_rate_pct: 8.3
+    affected_endpoints:
+      - /v1/charges
+      - /v1/payment_intents
+    datacenter: us-east-1
+    alert_fired_at: "2019-07-10T16:02:11Z"
+context_seed:
+  deploys: []
+  recent_logs:
+    - id: log:1
+      timestamp: "2019-07-10T15:58:04Z"
+      level: error
+      service: stripe-charges-api
+      message: >
+        MySQL query exceeded execution time limit (5000 ms); query on
+        charges table returned after 11200 ms — replication lag on
+        replica pool: 47 s
+    - id: log:2
+      timestamp: "2019-07-10T16:01:33Z"
+      level: error
+      service: stripe-db-proxy
+      message: >
+        Primary failover initiated for shard charges-primary-0; new primary
+        election in progress — replica promotion under load
+    - id: log:3
+      timestamp: "2019-07-10T16:03:55Z"
+      level: warning
+      service: stripe-db-proxy
+      message: >
+        Post-promotion replication lag growing: replica-1 lag=92s,
+        replica-2 lag=134s — write throughput exceeding replica catch-up
+        capacity
+    - id: log:4
+      timestamp: "2019-07-10T16:07:12Z"
+      level: error
+      service: stripe-charges-api
+      message: >
+        Read requests routed to lagged replicas returning stale data;
+        falling back to primary — primary CPU utilisation 94%
+    - id: log:5
+      timestamp: "2019-07-10T16:09:40Z"
+      level: error
+      service: stripe-webhook-delivery
+      message: >
+        Webhook delivery queue depth 180000 events; workers stalled
+        waiting on charges DB reads — delivery lag exceeding 8 min
+  similar_incidents:
+    - id: similar:stripe-2019-07-08-db-lag
+      title: "Charges DB replica lag spike — partial API slowdown"
+      root_cause: >
+        Replica fell behind during high write volume; promoted replica
+        required 20-minute catch-up window before reads stabilised
+      remediation: Manually rerouted reads to primary until lag cleared
+ground_truth:
+  category: dependency
+  acceptable_categories:
+    - dependency
+    - capacity
+  root_cause: >
+    The primary MySQL database cluster underpinning Stripe's Charges API was
+    operating near its maximum workload capacity. A planned replica promotion
+    under sustained production load caused the newly elected primary to be
+    immediately overwhelmed, triggering cascading replication lag across all
+    replicas. Read traffic fanned out to lagged replicas, returning stale
+    results and driving retry storms that amplified write pressure, producing
+    a self-reinforcing degradation loop.
+  correct_actions:
+    - Shed non-critical read traffic and rate-limit retrying clients to reduce write amplification on the overloaded primary
+    - Drain and pause webhook delivery workers to prevent queue-driven read storms from further loading the DB
+    - Halt replica promotion under load; wait for replication lag < 5 s before cutting over reads to any replica
+    - Instrument and alert on replication lag as a leading indicator before API error rate climbs
+    - Increase database cluster capacity (additional shards / horizontal scaling) before the next high-traffic window
+    - Implement a capacity ceiling alert that fires before the database reaches its workload limit, not after a failover cascades

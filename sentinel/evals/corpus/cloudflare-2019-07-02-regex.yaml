@@ -1,0 +1,75 @@
+id: cloudflare-2019-07-02-regex
+corpus_version: 1
+source_url: https://blog.cloudflare.com/details-of-the-cloudflare-outage-on-july-2-2019/
+sources_consulted:
+  - https://blog.cloudflare.com/details-of-the-cloudflare-outage-on-july-2-2019/
+notes: >
+  Canonical catastrophic-backtracking case. WAF rule containing a PCRE regex
+  with nested quantifiers (.*(?:.*=.*)) was deployed globally without staged
+  rollout, spiked all edge CPUs to ~100%, and dropped 80% of global traffic
+  for 27 minutes. Primary category deploy (shipped via standard WAF pipeline);
+  config also defensible (the rule itself is a config artifact).
+alert:
+  source: pagerduty
+  service: waf
+  severity: SEV1
+  title: WAF CPU exhaustion — 502 errors across all PoPs
+  timestamp: "2019-07-02T13:45:00Z"
+  raw_payload:
+    error_type: 502
+    traffic_loss_pct: 80
+    cpu_pct: 100
+    affected_services:
+      - waf
+      - cdn
+      - cloudflare-access
+      - cloudflare-dashboard
+context_seed:
+  deploys:
+    - id: deploy:waf-rule-1f716
+      service: waf
+      sha: 1f716
+      pr_title: "Add WAF rule for CVE-2019-0604 SharePoint RCE"
+      pr_diff_summary: >
+        Adds PCRE rule containing .*(?:.*=.*) with nested quantifiers;
+        deployed directly to global production without staged rollout
+        per WAF emergency-rule SOP.
+      deployed_at: "2019-07-02T13:42:00Z"
+      deployed_by: engineer
+  recent_logs:
+    - id: log:1
+      timestamp: "2019-07-02T13:45:00Z"
+      level: critical
+      service: waf
+      message: >
+        Synthetic WAF functionality test failed across all PoPs;
+        PagerDuty page fired
+    - id: log:2
+      timestamp: "2019-07-02T13:47:00Z"
+      level: critical
+      service: edge-proxy
+      message: >
+        HTTP/HTTPS worker processes unresponsive; frontline servers
+        returning 502; CPU at 100% on regex evaluation
+    - id: log:3
+      timestamp: "2019-07-02T14:07:00Z"
+      level: info
+      service: waf
+      message: Global WAF termination executed; CPU returning to baseline
+ground_truth:
+  category: deploy
+  acceptable_categories:
+    - deploy
+    - config
+  root_cause: >
+    WAF rule deployed globally containing a PCRE regex with catastrophic
+    backtracking potential (.*(?:.*=.*)); Lua WAF used PCRE with no
+    complexity ceiling, causing edge-worker CPUs to spike to ~100% and
+    dropping 80% of global traffic within minutes of rollout.
+  correct_actions:
+    - Globally disable the WAF rule set to shed CPU load immediately
+    - Identify and remove the backtracking regex from the rule before re-enabling
+    - Re-enable WAF globally only after regression-testing CPU consumption
+    - Implement staged WAF rule rollout (DOG → PIG → canary → global) for non-emergency changes
+    - Replace PCRE engine with re2 or Rust regex to enforce linear-time guarantees
+    - Add CPU-consumption tests to WAF rule CI pipeline

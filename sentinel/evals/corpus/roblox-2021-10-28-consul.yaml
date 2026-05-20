@@ -1,0 +1,76 @@
+id: roblox-2021-10-28-consul
+corpus_version: 1
+source_url: https://blog.roblox.com/2022/01/roblox-return-to-service-10-28-10-31-2021/
+sources_consulted:
+  - https://blog.roblox.com/2022/01/roblox-return-to-service-10-28-10-31-2021/
+notes: >
+  73-hour outage caused by two compounding Consul pathologies: streaming-feature
+  contention on a shared Go channel under high read+write load, and a BoltDB
+  freelist bug where a 16KB write triggered a 7.8MB freelist flush (2-3s latency).
+  Recovery required disabling streaming, restoring from snapshot, and gradual
+  DNS-steered player re-admission.
+alert:
+  source: generic
+  service: roblox-game-discovery
+  severity: SEV1
+  title: "Game-server discovery returning empty results; backend API p99 > 30s"
+  timestamp: "2021-10-28T20:00:00Z"
+  raw_payload:
+    check: game_discovery_health
+    p99_latency_ms: 34200
+    healthy_backends: 0
+    consul_kv_write_latency_ms: 2800
+    alert_id: "sev1-2021-10-28-001"
+context_seed:
+  deploys:
+    - id: deploy:streaming-rollout
+      service: traffic-routing
+      sha: "a3f91bc"
+      pr_title: "Enable Consul streaming on traffic-routing service"
+      pr_diff_summary: >
+        Enabled Consul streaming feature flag on traffic-routing service;
+        concurrent node count increased ~50% to support additional game-streaming
+        capacity. Upgrade leverages Consul 1.10 streaming (vs. prior long-polling).
+      deployed_at: "2021-10-27T14:00:00Z"
+  recent_logs:
+    - id: log:1
+      timestamp: "2021-10-28T13:37:00Z"
+      level: error
+      service: consul
+      message: "Vault performance degradation detected; Consul server CPU elevated across all nodes"
+    - id: log:2
+      timestamp: "2021-10-28T16:35:00Z"
+      level: error
+      service: consul
+      message: "BoltDB write latency 2800ms (baseline 300ms); freelist flush ~7.8MB on 16KB write"
+    - id: log:3
+      timestamp: "2021-10-28T20:00:00Z"
+      level: error
+      service: roblox-game-discovery
+      message: "Consul KV read timeout after 5s; returning empty server list to matchmaker"
+    - id: log:4
+      timestamp: "2021-10-28T20:05:00Z"
+      level: warning
+      service: consul
+      message: "Raft log store 4.2GB total; 489MB active data, 3.8GB reclaimed but unflushed freelist"
+ground_truth:
+  category: capacity
+  acceptable_categories:
+    - capacity
+    - dependency
+  root_cause: >
+    Enabling Consul streaming on the traffic-routing service (with a simultaneous
+    50% node-count increase) created high concurrent read+write load that exposed
+    two bugs: (1) streaming's reduced Go-channel concurrency controls caused write
+    blocking under combined load; (2) BoltDB's freelist was never compacted after
+    snapshots, so a 16KB Raft write triggered a 7.8MB freelist flush, causing
+    2-3s commit latency and cascading TCP backpressure across all Consul-dependent
+    services—taking the entire platform offline for 73 hours.
+  correct_actions:
+    - "Immediately disable Consul streaming feature flag across all services"
+    - "Restore Consul cluster from pre-outage snapshot with iptables rate-limiting on reconnect"
+    - "Compact or truncate BoltDB Raft log store to eliminate oversized freelist"
+    - "Shard Consul cluster so critical services have dedicated instances"
+    - "Remove circular telemetry dependency on Consul to enable safe cluster restarts"
+    - "Migrate BoltDB to bbolt with freelist pre-loading disabled"
+    - "Re-admit players gradually via DNS steering in 10% increments, monitoring DB and cache at each step"
