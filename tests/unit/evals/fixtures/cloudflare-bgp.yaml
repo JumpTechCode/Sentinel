@@ -1,0 +1,37 @@
+id: cloudflare-bgp-test-fixture
+corpus_version: 1
+source_url: https://example.com/cloudflare-bgp-2022
+sources_consulted:
+  - https://example.com/cloudflare-bgp-2022
+notes: Test fixture — not a real curated case
+alert:
+  source: generic
+  service: edge-network
+  severity: SEV1
+  title: Elevated 5xx errors across multiple POPs
+  timestamp: "2022-06-21T06:27:00Z"
+  raw_payload:
+    error_rate: 0.42
+context_seed:
+  deploys:
+    - id: deploy:abc123
+      service: edge-network
+      sha: abc123
+      pr_title: Update BGP route propagation policy
+      pr_diff_summary: Modifies prefix-list filter ordering
+      deployed_at: "2022-06-21T06:25:00Z"
+  recent_logs:
+    - id: log:1
+      timestamp: "2022-06-21T06:27:12Z"
+      level: error
+      service: edge-network
+      message: BGP session reset peer 1.2.3.4
+ground_truth:
+  category: config
+  acceptable_categories:
+    - config
+    - deploy
+  root_cause: BGP misconfiguration during a planned network change caused route propagation failures
+  correct_actions:
+    - Revert the BGP configuration change
+    - Roll back the deploy
