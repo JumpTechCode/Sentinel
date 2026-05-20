@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import anthropic
+import httpx
 from anthropic import AsyncAnthropic
 from anthropic.types import ToolParam
 from pydantic import SecretStr
@@ -40,11 +41,20 @@ class AnthropicClient:
         timeout_s: float,
         max_output_tokens: int,
         client: AsyncAnthropic | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.model = model
         self.timeout_s = timeout_s
         self.max_output_tokens = max_output_tokens
-        self._client = client or AsyncAnthropic(api_key=api_key.get_secret_value())
+        if client is not None:
+            self._client = client
+        elif http_client is not None:
+            self._client = AsyncAnthropic(
+                api_key=api_key.get_secret_value(),
+                http_client=http_client,
+            )
+        else:
+            self._client = AsyncAnthropic(api_key=api_key.get_secret_value())
 
     async def diagnose_call(
         self,
