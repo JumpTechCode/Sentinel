@@ -139,6 +139,15 @@ class EnrichmentConsumer:
                 "event_id": str(outbox_event_id),
                 "event": "incident.enriched",
                 "incident_id": str(envelope.incident_id),
+                # fingerprint + source must be propagated so downstream
+                # consumers (e.g., DiagnosisConsumer's IncidentEvent envelope)
+                # can validate the event. Without them, the diagnoser logs
+                # `diagnoser_invalid_envelope` and never produces a diagnosis
+                # in production — only the integration tests work because
+                # they fake events with all fields populated. Surfaced by
+                # PR 3c smoke testing.
+                "fingerprint": envelope.fingerprint,
+                "source": envelope.source,
                 "ts": assembled_at.isoformat(),
             },
             attempts=0,
