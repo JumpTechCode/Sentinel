@@ -1,5 +1,10 @@
 """Eval harness — corpus-driven scoring of diagnosis quality."""
 
+from sentinel.evals.corpus_loader import (
+    CorpusValidationError,
+    load_case,
+    load_corpus_dir,
+)
 from sentinel.evals.schema import (
     AlertSeed,
     ContextSeed,
@@ -26,6 +31,7 @@ __all__ = [
     "AlertSeed",
     "ContextSeed",
     "CorpusCase",
+    "CorpusValidationError",
     "DeploySeed",
     "GroundTruth",
     "LogSeed",
@@ -36,6 +42,8 @@ __all__ = [
     "RunbookSeed",
     "SimilarIncidentSeed",
     "bootstrap_ci",
+    "load_case",
+    "load_corpus_dir",
     "regression_for_metric",
     "score_action_coverage",
     "score_category",
