@@ -1026,9 +1026,75 @@ class RunbookRepository(Protocol):
 
 
 class EvalRunRepository(Protocol):
-    async def start(self, *, model: str, prompt_version: str, corpus_version: str) -> UUID: ...
+    """Persistence interface for eval harness runs and per-shot case results.
 
-    async def complete(self, run_id: UUID, summary: dict[str, float]) -> None: ...
+    Used by sentinel.evals.runner. Two-table model:
+      - eval_runs: one row per run; metadata + aggregated metrics + regression result
+      - eval_case_results: one row per (run, case, shot); per-shot metrics + raw LLM output
+
+    All methods are async (asyncpg under the hood). Methods that mutate state
+    use a single session.begin() block; partial failures roll back.
+    """
+
+    async def start_run(
+        self,
+        *,
+        status: Literal["running"],
+        trigger: Literal["local", "ci-smoke", "ci-nightly", "baseline", "manual"],
+        git_sha: str,
+        model: str,
+        prompt_version: str,
+        embedding_model_id: str,
+        corpus_version: str,
+        corpus_size: int,
+        shots_per_case: int,
+        fetcher_fixture_hash: str,
+        extra: dict[str, Any] | None = None,
+    ) -> UUID:
+        """Insert a new run row (status='running'). Returns the new run_id."""
+        ...
+
+    async def persist_shot(self, shot: EvalCaseResultRecord) -> None:
+        """Insert a single (run, case, shot) row including the denormalised incident
+        snapshot from `shot`. Idempotent on the UNIQUE (run_id, case_id, shot_index)
+        constraint — re-persisting a shot raises IntegrityError; callers should
+        treat that as a programming bug, not a retry signal."""
+        ...
+
+    async def finalize_run(
+        self,
+        run_id: UUID,
+        *,
+        status: Literal["ok", "failed", "partial"],
+        metrics: dict[str, float],
+        metrics_stability: dict[str, float],
+        regression_baseline_sha: str | None,
+        regression_passed: bool | None,
+        regression_detail: dict[str, Any] | None,
+    ) -> None:
+        """Update the run row: set completed_at=now(), terminal status, final
+        metrics + regression verdict. Raises EvalRunNotFoundOrAlreadyFinalized
+        if zero rows match (status != 'running' or run_id absent) — that's a
+        programming bug, not a retry signal. Idempotency belongs at the caller's
+        retry boundary, not silently here."""
+        ...
+
+    async def get_run(self, run_id: UUID) -> EvalRunRecord | None:
+        """Fetch a run by id, or None if absent."""
+        ...
+
+    async def get_latest_ok_run(
+        self, *, trigger: Literal["baseline", "ci-nightly"] | None = None
+    ) -> EvalRunRecord | None:
+        """Most recent status='ok' run, optionally filtered by trigger.
+        Used by `make readme-numbers` (trigger='baseline') and the regression
+        gate (no filter). Returns None if no matching run exists."""
+        ...
+
+    async def list_recent(self, *, limit: int = 50) -> list[EvalRunRecord]:
+        """Recent runs by started_at DESC. Pagination via limit only — eval
+        volume is low enough that offset-style paging is unnecessary."""
+        ...
 
 
 class PostgresDiagnosisRepository:
