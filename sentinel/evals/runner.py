@@ -220,10 +220,12 @@ async def run_corpus(
     per_case_shots: dict[str, list[MetricSet]] = {case.id: [] for case in cases}
 
     for case in cases:
-        # Truncate before the FIRST shot of this case; keep state across the
-        # case's shots so all N shots see the same incidents/diagnoses landscape.
-        # Per code-review feedback — the previous per-shot truncate destroyed
-        # shot 0's incident before shot 1 ran, defeating reproducibility.
+        # Truncate once per case (not per shot). Each shot uses a unique
+        # external_id (case.id + "-shot-" + shot_index) so shots don't
+        # collide on dedup or recurred-incident logic — meaning per-case
+        # truncate is enough to avoid cross-case state contamination, and
+        # per-shot truncate would only create races with the async
+        # enricher/diagnoser consumers reading earlier shots' events.
         await runner_deps.truncate_between_cases()
         REGISTRY.set(case)
         try:
@@ -237,7 +239,9 @@ async def run_corpus(
                             shot_index=shot_index,
                         )
                     )
-                incident_id, case_status, diagnosis = await _fire_and_poll(case, runner_deps)
+                incident_id, case_status, diagnosis = await _fire_and_poll(
+                    case, runner_deps, shot_index=shot_index
+                )
                 error_detail: str | None = None
                 if case_status == "ok" and diagnosis is not None:
                     metrics = await _score(diagnosis, case, runner_deps.embed)
@@ -306,6 +310,8 @@ async def run_corpus(
 async def _fire_and_poll(
     case: CorpusCase,
     deps: RunnerDeps,
+    *,
+    shot_index: int,
 ) -> tuple[UUID | None, CaseStatus, PersistedDiagnosis | None]:
     """POST the synthetic webhook, then poll for the diagnosis.
 
@@ -320,8 +326,13 @@ async def _fire_and_poll(
     # carries them as a separate `alert.*` block (cleaner curation), with
     # `raw_payload` reserved for supplementary monitoring data. Without the
     # merge the adapter rejects with 422 ("missing required fields").
+    # external_id per shot — each shot is its own incident from the system's
+    # view, so we don't fight Redis dedup, the recurred-incident path, or the
+    # enricher's incident lookup. The fingerprint
+    # (sha256(service||title||severity)) is still constant per case, but the
+    # external_id makes each row distinct.
     payload: dict[str, object] = {
-        "id": case.id,
+        "id": f"{case.id}-shot-{shot_index}",
         "service": case.alert.service,
         "severity": case.alert.severity,
         "title": case.alert.title,
@@ -422,14 +433,20 @@ async def _score(
     depending on yet another repo method just to recover what it already
     has in memory.
     """
-    # PersistedDiagnosis → Diagnosis-shaped score input. The scoring functions
-    # only read fields shared between the two types (likely_category,
-    # hypothesis, evidence, suggested_actions) — passing the persisted record
-    # via duck typing works, but constructing a real Diagnosis-shaped object
-    # keeps types tight.
+    # PersistedDiagnosis → Diagnosis-shaped score input. Use
+    # ``model_construct`` (skips validation) because the persisted record can
+    # legitimately have an empty ``evidence`` list: the production agent runs
+    # every ref through ``verify_evidence`` and stores only verified refs
+    # (`evidence=verdict.verified` in diagnosis/agent.py). A diagnosis whose
+    # LLM cited only-invented refs lands in the DB with `evidence=[]` and
+    # `hallucinated_evidence=True`. The Diagnosis schema requires
+    # ``min_length=1`` for fresh LLM outputs but the persisted form is a
+    # post-validation record. Constructing without validation lets the scorer
+    # operate on what the diagnosis ACTUALLY produced (and award 0 for
+    # evidence_quality, which is correct).
     from sentinel.schemas.diagnosis import Diagnosis
 
-    scoring_diagnosis = Diagnosis(
+    scoring_diagnosis = Diagnosis.model_construct(
         hypothesis=diagnosis.hypothesis,
         confidence=float(diagnosis.confidence),
         reasoning=diagnosis.reasoning,
