@@ -8,6 +8,15 @@ Create Date: 2026-05-19
 The existing Vector(1536) columns were aspirational and never populated.
 Switching to Vector(1024) to match BAAI/bge-large-en-v1.5 dimensions.
 pgvector does not support ALTER COLUMN dim; drop+recreate is required.
+
+Reversibility (invariant 8): both upgrade() and downgrade() are implemented
+and tested round-trip in tests/integration/memory/test_migration_0005.py.
+**Both directions are destructive of embedding data**: pgvector requires
+drop+recreate to change column dimensions, so any 1024-dim embeddings in
+incidents/runbooks are lost on downgrade (recreated as Vector(1536) NULL),
+and any 1536-dim embeddings would be lost on a subsequent re-upgrade. The
+column was empty pre-0005 so the upgrade itself is data-safe; operators
+running downgrade on a populated DB should accept the loss explicitly.
 """
 
 from __future__ import annotations
