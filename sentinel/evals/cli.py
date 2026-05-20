@@ -403,8 +403,17 @@ async def _run_async(
 
             _truncate_factory = _amsf(engine, expire_on_commit=False)
 
+            # Redis dedup cache lives at app.state.redis (set in lifespan).
+            # The webhook handler SETNXes `webhook:{source}:{sha256(body)}` with
+            # 24h TTL, returning {"status":"duplicate"} on a repeat. Without
+            # flushing between cases the second eval run (or any rerun within
+            # 24h) gets duplicates back for every case → 0 metrics across the
+            # board with no obvious symptom in the report.
+            _redis = app.state.redis
+
             async def _truncate() -> None:
                 await truncate_eval_runtime_state(_truncate_factory)
+                await _redis.flushdb()
 
             # Diagnosis repo — distinct session factory from the in-process
             # FastAPI app so the runner's polling doesn't fight the lifespan's
