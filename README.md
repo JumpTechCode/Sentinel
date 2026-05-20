@@ -7,7 +7,36 @@ Public engineering portfolio. Held to a production bar — every external call h
 ## Eval results
 
 <!-- evals:start -->
-*Pending PR 3c — first real corpus run lands the numbers here.*
+_From eval run `6f23b5e8-a72c-4df8-91e6-1adb181fdd51` (auto-generated; do not edit between markers)._
+
+## Aggregate Metrics
+
+| Metric | Value |
+|---|---|
+| category_match | 0.90 |
+| hypothesis_cosine | 0.81 |
+| action_coverage | 0.76 |
+| evidence_quality | 0.00 |
+
+## Per-case
+
+| Case | category | hypothesis | actions | evidence | stability |
+|---|---|---|---|---|---|
+| atlassian-2022-04-04-deletion | 1.00 | 0.87 | 0.74 | 0.00 | 0.00 |
+| aws-2021-12-07-useast1 | 1.00 | 0.82 | 0.76 | 0.00 | 0.00 |
+| cloudflare-2019-07-02-regex | 1.00 | 0.80 | 0.76 | 0.00 | 0.00 |
+| cloudflare-2022-06-21-bgp | 1.00 | 0.90 | 0.77 | 0.00 | 0.00 |
+| fastly-2021-06-08-config | 1.00 | 0.75 | 0.85 | 0.00 | 0.00 |
+| github-2018-10-21-network | 0.00 | 0.77 | 0.75 | 0.00 | 0.00 |
+| gitlab-2017-01-31-db-deletion | 1.00 | 0.79 | 0.71 | 0.00 | 0.00 |
+| roblox-2021-10-28-consul | 1.00 | 0.81 | 0.75 | 0.00 | 0.00 |
+| slack-2021-01-04-dns | 1.00 | 0.79 | 0.70 | 0.00 | 0.00 |
+| stripe-2019-07-10-db-failover | 1.00 | 0.85 | 0.77 | 0.00 | 0.00 |
+
+## Headline
+
+- pass_rate_strict: 0.0%
+- mean_stability: 0.000
 <!-- evals:end -->
 
 ## Why it's built this way

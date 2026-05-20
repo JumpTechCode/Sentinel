@@ -611,9 +611,15 @@ def _extract_headline_summary(md_path: Path) -> str:
     last 10 lines of the file if no headline section is found.
     """
     text = md_path.read_text()
-    headline_marker = "## Headline"
-    if headline_marker in text:
-        body = text[text.index(headline_marker) :].rstrip()
+    # Lift the "## Aggregate Metrics" block + everything through end-of-file
+    # (so Headline and any future trailing sections come along). The Per-case
+    # table sits between — it's verbose but useful for a portfolio reader
+    # checking the headline numbers against per-case detail.
+    agg_marker = "## Aggregate Metrics"
+    if agg_marker in text:
+        body = text[text.index(agg_marker) :].rstrip()
+    elif "## Headline" in text:
+        body = text[text.index("## Headline") :].rstrip()
     else:
         body = "\n".join(text.splitlines()[-10:])
 
