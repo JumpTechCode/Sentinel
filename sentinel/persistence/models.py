@@ -67,7 +67,10 @@ class IncidentModel(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
     resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
+    last_embedding_event_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
     context_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     context_assembled_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
@@ -88,6 +91,11 @@ class IncidentModel(Base):
             "ix_incidents_last_enrichment_event_id",
             "last_enrichment_event_id",
             postgresql_where=text("last_enrichment_event_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_incidents_last_embedding_event_id",
+            "last_embedding_event_id",
+            postgresql_where=text("last_embedding_event_id IS NOT NULL"),
         ),
     )
 
@@ -203,7 +211,7 @@ class RunbookModel(Base):
     service: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )

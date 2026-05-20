@@ -34,6 +34,7 @@ dependencies = [
   "opentelemetry-instrumentation-fastapi>=0.49b0,<1",
   "pyyaml>=6.0.2,<7",
   "pgvector>=0.3.0,<0.4.0",
+  "fastembed>=0.4,<0.5",
 ]
 
 [project.optional-dependencies]
@@ -108,7 +109,7 @@ files = ["sentinel", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["aiokafka.*", "asyncpg.*", "testcontainers.*", "locust.*", "pgvector.*"]
+module = ["aiokafka.*", "asyncpg.*", "testcontainers.*", "locust.*", "pgvector.*", "fastembed.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -124,6 +125,9 @@ filterwarnings = [
   # testcontainers uses a deprecated @wait_container_is_ready decorator internally;
   # filter it at module level since it fires on import, not in our code.
   "ignore::DeprecationWarning:testcontainers",
+  # huggingface_hub uses a deprecated hf_xet.download_files() call internally;
+  # this is a third-party library issue, not our code.
+  "ignore::DeprecationWarning:huggingface_hub",
 ]
 
 [tool.coverage.run]

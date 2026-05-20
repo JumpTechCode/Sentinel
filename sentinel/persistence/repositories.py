@@ -44,6 +44,38 @@ class DeployRow:
     deployed_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ResolutionData:
+    root_cause: str
+    remediation: str
+    diagnosis_was_correct: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryIncidentRow:
+    id: UUID
+    service: str
+    title: str
+    status: str
+    resolution: ResolutionData | None
+
+
+@dataclass(frozen=True, slots=True)
+class SimilarIncidentRow:
+    id: UUID
+    title: str
+    root_cause: str
+    remediation: str
+    cosine_similarity: float
+
+
+@dataclass(frozen=True, slots=True)
+class ResolveRecordResult:
+    incident_id: UUID
+    resolved_at: datetime
+    event_id: UUID
+
+
 # --- Outbox types ----------------------------------------------------------- #
 
 
@@ -330,6 +362,27 @@ class IncidentRepository(Protocol):
         since: datetime,
         exclude_incident_id: UUID,
     ) -> list[RelatedAlertItem]: ...
+
+    async def set_embedding(
+        self,
+        incident_id: UUID,
+        embedding: list[float],
+        *,
+        event_id: UUID,
+    ) -> Literal["written", "duplicate", "unknown_incident"]: ...
+
+    async def load_for_memory(
+        self,
+        incident_id: UUID,
+    ) -> MemoryIncidentRow | None: ...
+
+    async def similar_resolved_incidents(
+        self,
+        *,
+        query_embedding: list[float],
+        k: int,
+        exclude_incident_id: UUID | None,
+    ) -> list[SimilarIncidentRow]: ...
 
 
 class PostgresIncidentRepository:
@@ -649,6 +702,134 @@ class PostgresIncidentRepository:
                 for row in rows
             ]
 
+    async def set_embedding(
+        self,
+        incident_id: UUID,
+        embedding: list[float],
+        *,
+        event_id: UUID,
+    ) -> Literal["written", "duplicate", "unknown_incident"]:
+        """Idempotently set incidents.embedding from a memory event.
+
+        Conditional UPDATE: writes only when last_embedding_event_id != :event_id.
+        Returns three states so the consumer can pick the right log level / metric.
+        """
+        # asyncpg does not know how to encode list[float] as a vector literal;
+        # serialise to the pgvector wire format ('[f0,f1,...]') before binding.
+        vec_str = "[" + ",".join(str(f) for f in embedding) + "]"
+        async with self._session_factory() as s:
+            stmt = text(
+                "UPDATE incidents "
+                "SET embedding = CAST(:vec AS vector), "
+                "    last_embedding_event_id = :event_id "
+                "WHERE id = :incident_id "
+                "  AND (last_embedding_event_id IS DISTINCT FROM :event_id) "
+                "RETURNING id"
+            )
+            updated = (
+                await s.execute(
+                    stmt, {"vec": vec_str, "event_id": event_id, "incident_id": incident_id}
+                )
+            ).first()
+            if updated is not None:
+                await s.commit()
+                return "written"
+            # No row updated: either incident missing or event_id already applied.
+            exists = (
+                await s.execute(
+                    text("SELECT 1 FROM incidents WHERE id = :id"),
+                    {"id": incident_id},
+                )
+            ).first()
+            await s.rollback()
+            return "duplicate" if exists is not None else "unknown_incident"
+
+    async def load_for_memory(
+        self,
+        incident_id: UUID,
+    ) -> MemoryIncidentRow | None:
+        """Fetch service+title for opened path; optionally join resolution for resolved path."""
+        async with self._session_factory() as s:
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT i.id, i.service, i.title, i.status, "
+                        "       r.root_cause, r.remediation, r.diagnosis_was_correct "
+                        "FROM incidents i "
+                        "LEFT JOIN resolutions r ON r.incident_id = i.id "
+                        "WHERE i.id = :id"
+                    ),
+                    {"id": incident_id},
+                )
+            ).first()
+        if row is None:
+            return None
+        resolution: ResolutionData | None = None
+        if row.root_cause is not None:
+            resolution = ResolutionData(
+                root_cause=row.root_cause,
+                remediation=row.remediation,
+                diagnosis_was_correct=row.diagnosis_was_correct,
+            )
+        return MemoryIncidentRow(
+            id=row.id,
+            service=row.service,
+            title=row.title,
+            status=row.status,
+            resolution=resolution,
+        )
+
+    async def similar_resolved_incidents(
+        self,
+        *,
+        query_embedding: list[float],
+        k: int,
+        exclude_incident_id: UUID | None,
+    ) -> list[SimilarIncidentRow]:
+        """Cosine top-k of resolved incidents with a usable resolution.
+
+        Spec filters (§H acceptance):
+          - i.status IN ('resolved', 'closed')
+          - r.diagnosis_was_correct IS NULL OR r.diagnosis_was_correct = TRUE
+          - exclude_incident_id excluded if provided
+        Uses pgvector cosine distance; HNSW index serves the ORDER BY.
+        """
+        qvec_lit = "[" + ",".join(str(f) for f in query_embedding) + "]"
+        stmt = text(
+            "SELECT i.id, i.title, r.root_cause, r.remediation, "
+            "       1 - (i.embedding <=> CAST(:qvec AS vector)) AS cosine_similarity "
+            "FROM incidents i "
+            "JOIN resolutions r ON r.incident_id = i.id "
+            "WHERE i.embedding IS NOT NULL "
+            "  AND i.status IN ('resolved', 'closed') "
+            "  AND (r.diagnosis_was_correct IS NULL OR r.diagnosis_was_correct = TRUE) "
+            "  AND (CAST(:exclude_id AS uuid) IS NULL "
+            "       OR i.id <> CAST(:exclude_id AS uuid)) "
+            "ORDER BY i.embedding <=> CAST(:qvec AS vector) "
+            "LIMIT :k"
+        )
+        async with self._session_factory() as s:
+            rows = (
+                await s.execute(
+                    stmt,
+                    {
+                        "qvec": qvec_lit,
+                        "exclude_id": str(exclude_incident_id) if exclude_incident_id else None,
+                        "k": k,
+                    },
+                )
+            ).all()
+        return [
+            SimilarIncidentRow(
+                id=r.id,
+                title=r.title,
+                root_cause=r.root_cause,
+                remediation=r.remediation,
+                cosine_similarity=float(r.cosine_similarity),
+            )
+            for r in rows
+        ]
+
 
 # --- Deploy repository ------------------------------------------------------ #
 
@@ -776,7 +957,13 @@ class DiagnosisRepository(Protocol):
 
 
 class ResolutionRepository(Protocol):
-    async def record(self, incident_id: UUID, resolution: ResolveIncidentRequest) -> None: ...
+    async def record(
+        self,
+        incident_id: UUID,
+        resolution: ResolveIncidentRequest,
+        *,
+        outbox_topic: str,
+    ) -> ResolveRecordResult: ...
 
 
 class RunbookRepository(Protocol):
@@ -852,6 +1039,69 @@ class PostgresDiagnosisRepository:
             return diagnosis_id, "new"
 
 
+class PostgresResolutionRepository:
+    """Concrete ResolutionRepository — atomic INSERT resolution + UPDATE incident + stage outbox."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def record(
+        self,
+        incident_id: UUID,
+        body: ResolveIncidentRequest,
+        *,
+        outbox_topic: str,
+    ) -> ResolveRecordResult:
+        from sentinel.persistence.errors import IncidentAlreadyResolved, IncidentNotFound
+        from sentinel.persistence.models import ResolutionModel
+
+        async with self._session_factory() as session, session.begin():
+            incident = (
+                await session.execute(
+                    select(IncidentModel).where(IncidentModel.id == incident_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if incident is None:
+                raise IncidentNotFound(incident_id)
+            if incident.status in ("resolved", "closed"):
+                raise IncidentAlreadyResolved(incident_id)
+
+            now = (await session.execute(select(func.now()))).scalar_one()
+            now_iso = now.isoformat()
+
+            session.add(
+                ResolutionModel(
+                    incident_id=incident_id,
+                    root_cause=body.root_cause,
+                    remediation=body.remediation,
+                    category=body.category,
+                    diagnosis_was_correct=body.diagnosis_was_correct,
+                    notes=body.notes,
+                    resolved_by=body.resolved_by,
+                )
+            )
+
+            incident.status = "resolved"
+            incident.resolved_at = now
+
+            event_id = uuid.uuid4()
+            session.add(
+                OutboxEventModel(
+                    id=event_id,
+                    topic=outbox_topic,
+                    key=str(incident_id),
+                    payload={
+                        "event_id": str(event_id),
+                        "event": "incident.resolved",
+                        "incident_id": str(incident_id),
+                        "ts": now_iso,
+                    },
+                )
+            )
+
+        return ResolveRecordResult(incident_id=incident_id, resolved_at=now, event_id=event_id)
+
+
 # Concrete classes for the stubbed Protocols above land with their consumers
 # (Work Areas G, H, K). Keeping the Protocols here means downstream modules
 # can depend on the interface without forcing the implementation now.
@@ -863,6 +1113,7 @@ __all__ = [
     "EvalRunRepository",
     "IncidentRepository",
     "IngestResult",
+    "MemoryIncidentRow",
     "OutboxBatch",
     "OutboxEvent",
     "OutboxRepository",
@@ -870,7 +1121,11 @@ __all__ = [
     "PostgresDiagnosisRepository",
     "PostgresIncidentRepository",
     "PostgresOutboxRepository",
+    "PostgresResolutionRepository",
+    "ResolutionData",
     "ResolutionRepository",
+    "ResolveRecordResult",
     "RunbookRepository",
+    "SimilarIncidentRow",
     "StoredEnrichmentContext",
 ]

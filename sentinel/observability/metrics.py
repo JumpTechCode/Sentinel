@@ -202,6 +202,57 @@ enrichment_invalid_events_total = _safe_counter(
     [],
 )
 
+similar_incidents_query_duration_seconds = _safe_histogram(
+    "sentinel_similar_incidents_query_duration_seconds",
+    "Wall time of the pgvector top-k query in PgVectorIncidentStore.top_k.",
+    [],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+similar_incidents_returned_total = _safe_histogram(
+    "sentinel_similar_incidents_returned_total",
+    "Number of SimilarIncidentItems returned per top_k call.",
+    [],
+    buckets=(0, 1, 2, 3, 5, 10, 25),
+)
+
+memory_events_consumed_total = _safe_counter(
+    "sentinel_memory_events_consumed_total",
+    "Memory consumer events consumed, by event type.",
+    ["type"],
+)
+memory_events_failed_total = _safe_counter(
+    "sentinel_memory_events_failed_total",
+    "Memory consumer events that failed processing, by reason.",
+    ["reason"],
+)
+memory_duplicates_total = _safe_counter(
+    "sentinel_memory_duplicates_total",
+    "Memory consumer events that were duplicates of an already-processed event_id.",
+    [],
+)
+memory_invalid_events_total = _safe_counter(
+    "sentinel_memory_invalid_events_total",
+    "Memory consumer events whose envelope failed schema validation (poison pills).",
+    [],
+)
+memory_embedding_duration_seconds = _safe_histogram(
+    "sentinel_memory_embedding_duration_seconds",
+    "Wall time of text→vector embedding in the memory consumer, by event type.",
+    ["event_type"],
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+consumer_crashed_total = _safe_counter(
+    "sentinel_consumer_crashed_total",
+    # A background-task Kafka consumer ended unexpectedly. Issue #36's fix
+    # decoupled consumer.start() from lifespan; this counter is the signal
+    # operators page on when a decoupled consumer dies silently. Paired with
+    # the per-consumer aliveness flag exposed via /readyz.
+    "Background Kafka consumer tasks that ended unexpectedly (start failure or run-loop crash).",
+    ["consumer"],
+)
+
 _NAME_TO_ATTR: dict[str, str] = {
     "sentinel_webhooks_total": "webhooks_total",
     "sentinel_incidents_opened_total": "incidents_opened_total",
@@ -233,6 +284,14 @@ _NAME_TO_ATTR: dict[str, str] = {
     "sentinel_enrichment_events_failed_total": "enrichment_events_failed_total",
     "sentinel_enrichment_duplicates_total": "enrichment_duplicates_total",
     "sentinel_enrichment_invalid_events_total": "enrichment_invalid_events_total",
+    "sentinel_similar_incidents_query_duration_seconds": "similar_incidents_query_duration_seconds",
+    "sentinel_similar_incidents_returned_total": "similar_incidents_returned_total",
+    "sentinel_memory_events_consumed_total": "memory_events_consumed_total",
+    "sentinel_memory_events_failed_total": "memory_events_failed_total",
+    "sentinel_memory_duplicates_total": "memory_duplicates_total",
+    "sentinel_memory_invalid_events_total": "memory_invalid_events_total",
+    "sentinel_memory_embedding_duration_seconds": "memory_embedding_duration_seconds",
+    "sentinel_consumer_crashed_total": "consumer_crashed_total",
 }
 
 
