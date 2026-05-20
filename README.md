@@ -39,6 +39,13 @@ _From eval run `6f23b5e8-a72c-4df8-91e6-1adb181fdd51` (auto-generated; do not ed
 - mean_stability: 0.000
 <!-- evals:end -->
 
+> `evidence_quality=0.00` and `pass_rate_strict=0.0%` reflect a known prompt /
+> validator ID-format mismatch — the LLM cites bare IDs (`may-12-bug`) while
+> the validation gate matches the full prefixed form (`deploy:may-12-bug`).
+> Hits production diagnoses identically; tracked as a follow-up to reconcile
+> the prompt convention with the validator. The category / hypothesis /
+> action numbers above are the real signal.
+
 ## Why it's built this way
 
 A few load-bearing choices that distinguish Sentinel from a typical "LLM wrapper":

@@ -114,10 +114,12 @@ yarn-error.log*
 evals/results/*.json
 evals/results/*.html
 !evals/results/.gitkeep
+# Exception: the run cited by the README markers is committed so reviewers
+# can verify the numbers against the source artifact in git.
+!evals/results/6f23b5e8-a72c-4df8-91e6-1adb181fdd51.json
 
 # Secrets / credentials
 *.pem
 *.key
 secrets/
 .secrets/
-evals/results/*.md
