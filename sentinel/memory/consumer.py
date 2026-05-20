@@ -43,6 +43,13 @@ class _EventEnvelope(BaseModel):
     incident_id: UUID
 
 
+# Embedding-failure budget before we declare the message dead and commit.
+# Two retries cover transient ONNX init races / fastembed cold-start hiccups;
+# three is the budget before the wedge-clear cost outweighs further redelivery.
+# Promote to `Settings` only if operator tuning becomes necessary.
+_EMBED_POISON_PILL_THRESHOLD = 3
+
+
 class MemoryConsumer:
     def __init__(
         self,
@@ -53,9 +60,25 @@ class MemoryConsumer:
         self._consumer = consumer
         self._deps = deps
         self._stop = asyncio.Event()
+        # Embedding poison-pill state. A persistent fastembed failure (corrupt
+        # ONNX model, missing weights) makes every embed() raise the same
+        # non-TimeoutError exception. Without a bound, the run() loop hot-loops
+        # on the same offset (no commit → Kafka redelivers → same failure).
+        # After N consecutive failures on the SAME event_id, give up and
+        # commit so the stream advances. Counter resets on success or when
+        # a different event_id arrives.
+        # In-memory only: on process restart the counter resets and the bound
+        # restarts from zero. Worst case is (restarts * threshold) redeliveries
+        # before the poison-pill commit — bounded, acceptable for V1.
+        self._last_failed_event_id: UUID | None = None
+        self._embed_consecutive_failures: int = 0
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _reset_embed_failure_state(self) -> None:
+        self._last_failed_event_id = None
+        self._embed_consecutive_failures = 0
 
     async def run(self) -> None:
         async for msg in self._consumer:
@@ -122,7 +145,11 @@ class MemoryConsumer:
                 return
             text_input = self._deps.pipeline.compose_resolved(row, row.resolution)
 
-        # 5. Embed (timeout → poison pill commit).
+        # 5. Embed. Timeout = poison pill (commit). Other exceptions retry
+        #    until the consecutive-failure bound trips for this event_id, at
+        #    which point we treat it as a poison pill too (corrupt model file,
+        #    OnnxRuntime init failure). Without the bound, a persistent error
+        #    wedges the consumer on the first failing offset forever.
         start = time.monotonic()
         try:
             vector = await self._deps.embedding_provider.embed(text_input)
@@ -132,8 +159,33 @@ class MemoryConsumer:
                 extra={"len": len(text_input), "incident_id": str(envelope.incident_id)},
             )
             memory_events_failed_total.labels(reason="embedding_timeout").inc()
+            self._reset_embed_failure_state()
             await self._consumer.commit()
             return
+        except Exception as e:
+            if envelope.event_id == self._last_failed_event_id:
+                self._embed_consecutive_failures += 1
+            else:
+                self._last_failed_event_id = envelope.event_id
+                self._embed_consecutive_failures = 1
+
+            if self._embed_consecutive_failures >= _EMBED_POISON_PILL_THRESHOLD:
+                _LOG.error(
+                    "embedding_poison_pill",
+                    extra={
+                        "incident_id": str(envelope.incident_id),
+                        "event_id": str(envelope.event_id),
+                        "attempts": self._embed_consecutive_failures,
+                        "exc_type": type(e).__name__,
+                    },
+                )
+                memory_events_failed_total.labels(reason="embedding_poison_pill").inc()
+                self._reset_embed_failure_state()
+                await self._consumer.commit()
+                return
+            raise  # re-raise so run() doesn't commit; Kafka will redeliver
+        else:
+            self._reset_embed_failure_state()
         finally:
             memory_embedding_duration_seconds.labels(event_type=envelope.event).observe(
                 time.monotonic() - start
@@ -141,6 +193,12 @@ class MemoryConsumer:
 
         # 6. Idempotent write. Repository raises on infra failure → propagates;
         #    the run() loop catches and does NOT commit, redelivery handles it.
+        #    DB failures are NOT counted toward the embedding poison-pill bound:
+        #    Postgres restarts / deadlocks / failovers are transient by design
+        #    (the point of at-least-once is to ride them out), while embedding
+        #    failures are deterministic-on-input (corrupt model → every call
+        #    fails identically). Sharing the bound would poison-pill healthy
+        #    incidents during a routine DB rotation.
         result = await self._deps.incident_repo.set_embedding(
             envelope.incident_id, vector, event_id=envelope.event_id
         )
