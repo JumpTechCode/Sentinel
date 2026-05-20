@@ -90,7 +90,10 @@ def test_upgrade_produces_1024_dim_columns_and_event_id(pg_dsn: str) -> None:
 
 def test_round_trip_downgrade_then_upgrade(pg_dsn: str) -> None:
     cfg = _alembic_cfg(pg_dsn)
-    command.downgrade(cfg, "-1")
+    # Pin the downgrade target to the explicit revision before 0005 rather than
+    # "-1" — relative offsets drift as new migrations land (e.g. 0006 made head
+    # advance, so "-1" lands on 0005 instead of 0004).
+    command.downgrade(cfg, "0004_diagnoses_idempotency")
 
     async def _check_downgraded() -> None:
         engine = create_async_engine(pg_dsn)
