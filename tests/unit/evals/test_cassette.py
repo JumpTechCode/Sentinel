@@ -138,7 +138,16 @@ def test_record_mode_requires_set_context_before_handle(tmp_path: Path) -> None:
     bug. Raise loudly on the first request, not silently overwrite."""
     from sentinel.evals.cassette import CassetteTransport
 
-    transport = CassetteTransport(mode="record", cassette_dir=tmp_path)
+    # Inject a fake inner transport so the API-key guard (which fires only when
+    # inner_transport is None) doesn't pre-empt the no-context check we want
+    # to exercise.
+    class _NoopInner(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise AssertionError("should not be called — no-context check fires first")
+
+    transport = CassetteTransport(
+        mode="record", cassette_dir=tmp_path, inner_transport=_NoopInner()
+    )
     request = httpx.Request("POST", "https://api.anthropic.com/v1/messages", json={})
     with pytest.raises(RuntimeError, match="set_context"):
         # We don't actually call the network in this test — the no-context check
@@ -146,6 +155,19 @@ def test_record_mode_requires_set_context_before_handle(tmp_path: Path) -> None:
         import asyncio
 
         asyncio.run(transport.handle_async_request(request))
+
+
+def test_record_mode_default_inner_requires_anthropic_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an injected inner transport, record mode requires the API key —
+    otherwise a 401 would be silently recorded and replayed forever."""
+    from sentinel.evals.cassette import CassetteTransport
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("SENTINEL_ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        CassetteTransport(mode="record", cassette_dir=tmp_path)
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,12 @@ Deviations from a one-to-one shape match (vs. the plan):
 - ``RunbookItem`` requires ``cosine_similarity: float`` in production; the
   seed omits it (runbook retrieval scoring is not part of the corpus-author
   contract). Translation defaults to ``0.0``.
+- ``SimilarIncidentSeed.cosine_similarity`` is constrained to ``[0.0, 1.0]``
+  in the corpus schema, but the production ``SimilarIncidentItem`` accepts
+  ``[-1.0, 1.0]``. The seed is intentionally stricter — a curator setting a
+  negative similarity is almost certainly a mistake. Translation passes
+  through verbatim (no fixup needed; the seed value is always in-range for
+  production).
 """
 
 from __future__ import annotations
