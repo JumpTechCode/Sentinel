@@ -24,6 +24,8 @@ from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.persistence.models import (
     DeployModel,
     DiagnosisModel,
+    EvalCaseResultModel,
+    EvalRunModel,
     IncidentModel,
     OutboxEventModel,
 )
@@ -1221,6 +1223,163 @@ class PostgresResolutionRepository:
         return ResolveRecordResult(incident_id=incident_id, resolved_at=now, event_id=event_id)
 
 
+class PostgresEvalRunRepository:
+    """Concrete EvalRunRepository over asyncpg.
+
+    All writes use a single session.begin() block so partial failures roll back.
+    No outbox involvement — eval data is internal-only and not published to Kafka.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def start_run(
+        self,
+        *,
+        status: Literal["running"],
+        trigger: Literal["local", "ci-smoke", "ci-nightly", "baseline", "manual"],
+        git_sha: str,
+        model: str,
+        prompt_version: str,
+        embedding_model_id: str,
+        corpus_version: str,
+        corpus_size: int,
+        shots_per_case: int,
+        fetcher_fixture_hash: str,
+        extra: dict[str, Any] | None = None,
+    ) -> UUID:
+        async with self._session_factory() as session, session.begin():
+            row = EvalRunModel(
+                status=status,
+                trigger=trigger,
+                git_sha=git_sha,
+                model=model,
+                prompt_version=prompt_version,
+                embedding_model_id=embedding_model_id,
+                corpus_version=corpus_version,
+                corpus_size=corpus_size,
+                shots_per_case=shots_per_case,
+                fetcher_fixture_hash=fetcher_fixture_hash,
+                extra=extra or {},
+            )
+            session.add(row)
+            # flush() emits the INSERT and populates row.id from the server default
+            # (SQLAlchemy 2.0 uses RETURNING for server-default UUIDs on PG).
+            await session.flush()
+            return row.id
+
+    async def persist_shot(self, shot: EvalCaseResultRecord) -> None:
+        async with self._session_factory() as session, session.begin():
+            session.add(
+                EvalCaseResultModel(
+                    run_id=shot.run_id,
+                    case_id=shot.case_id,
+                    shot_index=shot.shot_index,
+                    case_status=shot.case_status,
+                    metrics=shot.metrics,
+                    raw_response=shot.raw_response,
+                    diagnosis=shot.diagnosis,
+                    incident_id=shot.incident_id,
+                    incident_fingerprint=shot.incident_fingerprint,
+                    incident_title=shot.incident_title,
+                    incident_severity=shot.incident_severity,
+                    token_usage=shot.token_usage,
+                    latency_ms=shot.latency_ms,
+                    error_detail=shot.error_detail,
+                )
+            )
+
+    async def finalize_run(
+        self,
+        run_id: UUID,
+        *,
+        status: Literal["ok", "failed", "partial"],
+        metrics: dict[str, float],
+        metrics_stability: dict[str, float],
+        regression_baseline_sha: str | None,
+        regression_passed: bool | None,
+        regression_detail: dict[str, Any] | None,
+    ) -> None:
+        from sentinel.persistence.errors import EvalRunNotFoundOrAlreadyFinalized
+
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                update(EvalRunModel)
+                .where(
+                    EvalRunModel.id == run_id,
+                    EvalRunModel.status == "running",
+                )
+                .values(
+                    completed_at=func.now(),
+                    status=status,
+                    metrics=metrics,
+                    metrics_stability=metrics_stability,
+                    regression_baseline_sha=regression_baseline_sha,
+                    regression_passed=regression_passed,
+                    regression_detail=regression_detail,
+                )
+            )
+            # UPDATE returns a CursorResult which exposes rowcount; SQLAlchemy's
+            # generic Result type doesn't, hence the ignore.
+            if result.rowcount == 0:  # type: ignore[attr-defined]
+                raise EvalRunNotFoundOrAlreadyFinalized(run_id)
+
+    async def get_run(self, run_id: UUID) -> EvalRunRecord | None:
+        async with self._session_factory() as session:
+            result = await session.execute(select(EvalRunModel).where(EvalRunModel.id == run_id))
+            row = result.scalar_one_or_none()
+            return _eval_run_record_from_model(row) if row else None
+
+    async def get_latest_ok_run(
+        self, *, trigger: Literal["baseline", "ci-nightly"] | None = None
+    ) -> EvalRunRecord | None:
+        async with self._session_factory() as session:
+            stmt = (
+                select(EvalRunModel)
+                .where(EvalRunModel.status == "ok")
+                .order_by(EvalRunModel.started_at.desc())
+                .limit(1)
+            )
+            if trigger is not None:
+                stmt = stmt.where(EvalRunModel.trigger == trigger)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return _eval_run_record_from_model(row) if row else None
+
+    async def list_recent(self, *, limit: int = 50) -> list[EvalRunRecord]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(EvalRunModel).order_by(EvalRunModel.started_at.desc()).limit(limit)
+            )
+            return [_eval_run_record_from_model(row) for row in result.scalars().all()]
+
+
+def _eval_run_record_from_model(row: EvalRunModel) -> EvalRunRecord:
+    """ORM → frozen dataclass mapping. Keeps the repository's return type stable
+    even if the ORM grows additional columns. CHECK constraints enforce the
+    Literal narrowing on `status`/`trigger`; the type: ignore[arg-type] comments
+    document that the DB schema is the runtime authority for those enums."""
+    return EvalRunRecord(
+        id=row.id,
+        status=row.status,  # type: ignore[arg-type]  # ck_eval_runs_status_valid enforces
+        trigger=row.trigger,  # type: ignore[arg-type]  # ck_eval_runs_trigger_valid enforces
+        git_sha=row.git_sha,
+        model=row.model,
+        prompt_version=row.prompt_version,
+        embedding_model_id=row.embedding_model_id,
+        corpus_version=row.corpus_version,
+        corpus_size=row.corpus_size,
+        shots_per_case=row.shots_per_case,
+        fetcher_fixture_hash=row.fetcher_fixture_hash,
+        metrics=dict(row.metrics) if row.metrics else {},
+        metrics_stability=dict(row.metrics_stability) if row.metrics_stability else {},
+        regression_baseline_sha=row.regression_baseline_sha,
+        regression_passed=row.regression_passed,
+        regression_detail=dict(row.regression_detail) if row.regression_detail else None,
+        extra=dict(row.extra) if row.extra else {},
+    )
+
+
 # Concrete classes for the stubbed Protocols above land with their consumers
 # (Work Areas G, H, K). Keeping the Protocols here means downstream modules
 # can depend on the interface without forcing the implementation now.
@@ -1229,6 +1388,8 @@ __all__ = [
     "DeployRow",
     "DiagnosisRepository",
     "EnrichmentWriteResult",
+    "EvalCaseResultRecord",
+    "EvalRunRecord",
     "EvalRunRepository",
     "IncidentRepository",
     "IngestResult",
@@ -1238,6 +1399,7 @@ __all__ = [
     "OutboxRepository",
     "PostgresDeployRepository",
     "PostgresDiagnosisRepository",
+    "PostgresEvalRunRepository",
     "PostgresIncidentRepository",
     "PostgresOutboxRepository",
     "PostgresResolutionRepository",
