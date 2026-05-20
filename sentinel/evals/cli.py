@@ -104,6 +104,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--smoke", action="store_true", help="run only the first 5 cases (sorted by id)"
     )
     run_p.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Opt-in flag to run against the live Anthropic API (no cassette replay). "
+            "Required when neither --cassette-dir nor SENTINEL_EVAL_CASSETTE_DIR is set; "
+            "guards against accidentally burning API budget from a typo'd env var."
+        ),
+    )
+    run_p.add_argument(
         "--output-dir",
         type=Path,
         default=Path("evals/results"),
@@ -191,6 +200,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
     corpus_dir = args.corpus or settings.eval_corpus_dir
     if corpus_dir is None:
         print("error: --corpus or SENTINEL_EVAL_CORPUS_DIR must be provided", file=sys.stderr)
+        return 1
+
+    # Cassette-dir guard: prevent silently burning API budget if no cassette dir
+    # is set and the operator didn't explicitly opt into live mode.
+    cassette_dir = args.cassette_dir or settings.eval_cassette_dir
+    if cassette_dir is None and not args.live:
+        print(
+            "error: no cassette directory set — pass --cassette-dir or set "
+            "SENTINEL_EVAL_CASSETTE_DIR for replay; pass --live to opt into "
+            "live Anthropic API calls (burns budget)",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -327,6 +348,11 @@ async def _run_async(
             finally:
                 await engine.dispose()
 
+    # Only reached if run_corpus succeeded; an exception inside the lifespan/
+    # client/engine contexts above propagates out of _run_async to the caller,
+    # which catches CassetteMiss/RuntimeError. Guarding with `result is not None`
+    # would not help because `result` would be unbound — let the caller see the
+    # original exception.
     args.output_dir.mkdir(parents=True, exist_ok=True)
     json_path, md_path = write_report(run_result=result, output_dir=args.output_dir)
     print(f"eval run complete: run_id={run_id}")

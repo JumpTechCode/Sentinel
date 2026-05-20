@@ -220,61 +220,70 @@ async def run_corpus(
     per_case_shots: dict[str, list[MetricSet]] = {case.id: [] for case in cases}
 
     for case in cases:
-        for shot_index in range(shots_per_case):
-            await runner_deps.truncate_between_cases()
-            REGISTRY.set(case)
-            if runner_deps.cassette_transport is not None:
-                runner_deps.cassette_transport.set_context(
-                    CassetteContext(
-                        prompt_version=runner_deps.prompt_version,
-                        model_id=runner_deps.model_id,
-                        case_id=case.id,
-                        shot_index=shot_index,
+        # Truncate before the FIRST shot of this case; keep state across the
+        # case's shots so all N shots see the same incidents/diagnoses landscape.
+        # Per code-review feedback — the previous per-shot truncate destroyed
+        # shot 0's incident before shot 1 ran, defeating reproducibility.
+        await runner_deps.truncate_between_cases()
+        REGISTRY.set(case)
+        try:
+            for shot_index in range(shots_per_case):
+                if runner_deps.cassette_transport is not None:
+                    runner_deps.cassette_transport.set_context(
+                        CassetteContext(
+                            prompt_version=runner_deps.prompt_version,
+                            model_id=runner_deps.model_id,
+                            case_id=case.id,
+                            shot_index=shot_index,
+                        )
                     )
-                )
-            incident_id, case_status, diagnosis = await _fire_and_poll(case, runner_deps)
-            error_detail: str | None = None
-            if case_status == "ok" and diagnosis is not None:
-                metrics = await _score(diagnosis, case, runner_deps.embed)
-            else:
-                metrics = MetricSet(
-                    category_match=0.0,
-                    hypothesis_cosine=0.0,
-                    action_coverage=0.0,
-                    evidence_quality=None,
-                )
-                error_detail = (
-                    "webhook ingest did not return 202"
-                    if case_status == "ingest_failed"
-                    else f"diagnosis poll timed out after {runner_deps.poll_timeout_s}s"
-                )
+                incident_id, case_status, diagnosis = await _fire_and_poll(case, runner_deps)
+                error_detail: str | None = None
+                if case_status == "ok" and diagnosis is not None:
+                    metrics = await _score(diagnosis, case, runner_deps.embed)
+                else:
+                    metrics = MetricSet(
+                        category_match=0.0,
+                        hypothesis_cosine=0.0,
+                        action_coverage=0.0,
+                        evidence_quality=None,
+                    )
+                    error_detail = (
+                        "webhook ingest did not return 202"
+                        if case_status == "ingest_failed"
+                        else f"diagnosis poll timed out after {runner_deps.poll_timeout_s}s"
+                    )
 
-            shot = EvalCaseResultRecord(
-                run_id=runner_deps.run_id,
-                case_id=case.id,
-                shot_index=shot_index,
-                case_status=case_status,
-                metrics={
-                    "category_match": metrics.category_match,
-                    "hypothesis_cosine": metrics.hypothesis_cosine,
-                    "action_coverage": metrics.action_coverage,
-                    "evidence_quality": metrics.evidence_quality,
-                },
-                diagnosis=_persisted_to_dict(diagnosis) if diagnosis is not None else None,
-                incident_id=incident_id,
-                incident_fingerprint=compute_fingerprint(
-                    case.alert.service,
-                    normalize_title(case.alert.title),
-                    case.alert.severity,
-                ),
-                incident_title=case.alert.title,
-                incident_severity=case.alert.severity,
-                token_usage=dict(diagnosis.token_usage) if diagnosis is not None else None,
-                latency_ms=diagnosis.latency_ms if diagnosis is not None else None,
-                error_detail=error_detail,
-            )
-            await runner_deps.eval_run_repo.persist_shot(shot)
-            per_case_shots[case.id].append(metrics)
+                shot = EvalCaseResultRecord(
+                    run_id=runner_deps.run_id,
+                    case_id=case.id,
+                    shot_index=shot_index,
+                    case_status=case_status,
+                    metrics={
+                        "category_match": metrics.category_match,
+                        "hypothesis_cosine": metrics.hypothesis_cosine,
+                        "action_coverage": metrics.action_coverage,
+                        "evidence_quality": metrics.evidence_quality,
+                    },
+                    diagnosis=_persisted_to_dict(diagnosis) if diagnosis is not None else None,
+                    incident_id=incident_id,
+                    incident_fingerprint=compute_fingerprint(
+                        case.alert.service,
+                        normalize_title(case.alert.title),
+                        case.alert.severity,
+                    ),
+                    incident_title=case.alert.title,
+                    incident_severity=case.alert.severity,
+                    token_usage=dict(diagnosis.token_usage) if diagnosis is not None else None,
+                    latency_ms=diagnosis.latency_ms if diagnosis is not None else None,
+                    error_detail=error_detail,
+                )
+                await runner_deps.eval_run_repo.persist_shot(shot)
+                per_case_shots[case.id].append(metrics)
+        finally:
+            # Clear the registry between cases so a stray late callback (e.g.
+            # delayed Kafka redelivery) doesn't pick up a stale case.
+            REGISTRY.clear()
 
     per_case_metrics: dict[str, MetricSet] = {}
     stability: dict[str, dict[str, float]] = {}
