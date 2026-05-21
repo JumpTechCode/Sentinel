@@ -2,22 +2,25 @@
 
 Subcommands (argparse):
 
-  * ``run`` — fully implemented in PR 3b. Boots an in-process FastAPI app via
-    ``build_app()``, drives requests through ``httpx.AsyncClient(transport=
-    ASGITransport(...))``, polls Postgres for the resulting diagnoses, scores
-    each shot against the corpus ground truth, and writes a JSON + Markdown
-    report under ``evals/results/<run_id>.{json,md}``.
-  * ``record`` — stub. Real cassette recording lands with the 10 corpus YAMLs
-    in PR 3c; this stub prints a clear "use manual record flow" message and
-    exits 1.
-  * ``baseline`` — stub. Wired in PR 3c once the first real corpus run produces
-    a baseline.
-  * ``readme`` — patches ``README.md`` between
-    ``<!-- evals:start -->`` / ``<!-- evals:end -->`` markers with the headline
-    metrics from the most recent ``evals/results/*.md`` report (PR 1's
-    ``PostgresEvalRunRepository`` will replace this filesystem lookup once it
-    lands).
-  * ``compare-to-baseline`` — stub. Wired in PR 3c.
+  * ``run`` — boots an in-process FastAPI app via ``build_app()``, drives
+    requests through ``httpx.AsyncClient(transport=ASGITransport(...))``,
+    polls Postgres for the resulting diagnoses, scores each shot against the
+    corpus ground truth, and writes a JSON + Markdown report under
+    ``evals/results/<run_id>.{json,md}``.
+  * ``record`` — drives the corpus end-to-end against the live Anthropic API,
+    writing the captured HTTP exchanges into ``--cassette-dir`` as one JSON
+    file per (case, shot). Requires ``ANTHROPIC_API_KEY``.
+  * ``baseline`` — delegates to ``run``, then transforms the JSON report into
+    ``evals/baselines/<name>.json`` (adds git_sha + prompt_version +
+    model_id + recorded_at metadata so the regression gate can refuse to
+    compare across incompatible runs).
+  * ``readme`` — patches ``README.md`` between ``<!-- evals:start -->`` /
+    ``<!-- evals:end -->`` markers with the headline metrics from the most
+    recent ``evals/results/*.md`` report.
+  * ``compare-to-baseline`` — runs the paired-bootstrap regression gate
+    (per-metric, vs ``evals/baselines/<name>.json``) and exits non-zero on
+    regression. Prints a markdown table for PR comments; optionally writes
+    it to ``--output``.
 
 Operational caveat repeated in the ``run`` help text: the runner shares the
 compose data tier (Postgres + Kafka + Redis) with the compose ``app`` container
@@ -52,6 +55,8 @@ from sentinel.memory.embeddings import FastEmbedProvider
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
+
+    from sentinel.evals.schema import RegressionVerdict
 
 log = logging.getLogger(__name__)
 
@@ -171,11 +176,58 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rec_p.set_defaults(func=_cmd_record)
 
-    # baseline (stub) -------------------------------------------------------
-    base_p = sub.add_parser("baseline", help="(PR 3c) record a baseline corpus run")
-    base_p.add_argument("--corpus", type=Path, default=None)
-    base_p.add_argument("--shots", type=int, default=5)
-    base_p.set_defaults(func=_cmd_baseline_stub)
+    # baseline --------------------------------------------------------------
+    # Runs the corpus through the same pipeline as `run`, then writes a
+    # baseline JSON to `evals/baselines/{name}.json` for the regression
+    # gate to compare future runs against. Replay-only (cassette dir
+    # required) so regenerating a baseline is deterministic and free.
+    base_p = sub.add_parser(
+        "baseline",
+        help="record a baseline corpus run (writes evals/baselines/{name}.json)",
+    )
+    base_p.add_argument("--corpus", type=Path, default=None, help="corpus directory")
+    base_p.add_argument(
+        "--cassette-dir",
+        type=Path,
+        default=None,
+        help="cassette replay directory; overrides SENTINEL_EVAL_CASSETTE_DIR",
+    )
+    base_p.add_argument(
+        "--shots",
+        type=int,
+        default=1,
+        help=(
+            "shots per case (default: 1; see `run --shots` for the multi-shot "
+            "structural limitation tracked in issue #49)"
+        ),
+    )
+    base_p.add_argument(
+        "--smoke", action="store_true", help="baseline only the first 5 cases (sorted by id)"
+    )
+    base_p.add_argument(
+        "--name",
+        type=str,
+        default="main",
+        help="baseline name (file: <baseline-dir>/<name>.json); default: main",
+    )
+    base_p.add_argument(
+        "--baseline-dir",
+        type=Path,
+        default=Path("evals/baselines"),
+        help="where to write the baseline JSON; default: evals/baselines",
+    )
+    base_p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("evals/results"),
+        help="intermediate report dir for the underlying run; default: evals/results",
+    )
+    base_p.add_argument(
+        "--live",
+        action="store_true",
+        help="opt-in to live API calls (default: cassette replay only)",
+    )
+    base_p.set_defaults(func=_cmd_baseline)
 
     # readme ----------------------------------------------------------------
     readme_p = sub.add_parser(
@@ -196,14 +248,59 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     readme_p.set_defaults(func=_cmd_readme)
 
-    # compare-to-baseline (stub) -------------------------------------------
+    # compare-to-baseline ---------------------------------------------------
+    # Reads a baseline JSON + a run result JSON, runs the paired-bootstrap
+    # regression gate per metric, prints a markdown table, exits non-zero
+    # iff any metric regressed (CI excludes zero AND mean diff worse than
+    # the practical floor).
     cmp_p = sub.add_parser(
         "compare-to-baseline",
-        help="(PR 3c) compare a run's metrics to a baseline file",
+        help="compare a run's metrics to a baseline file (paired-bootstrap gate)",
     )
-    cmp_p.add_argument("--run-id", type=str, required=False)
-    cmp_p.add_argument("--baseline", type=Path, required=False)
-    cmp_p.set_defaults(func=_cmd_compare_stub)
+    cmp_p.add_argument(
+        "--run-json",
+        type=Path,
+        required=False,
+        help=("path to the run's JSON report; default: latest *.json in " "--results-dir by mtime"),
+    )
+    cmp_p.add_argument(
+        "--results-dir",
+        type=Path,
+        default=Path("evals/results"),
+        help="where to look for run JSON if --run-json is omitted; default: evals/results",
+    )
+    cmp_p.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="path to baseline JSON; default: <baseline-dir>/<name>.json",
+    )
+    cmp_p.add_argument(
+        "--baseline-dir",
+        type=Path,
+        default=Path("evals/baselines"),
+        help="baseline directory; default: evals/baselines",
+    )
+    cmp_p.add_argument("--name", type=str, default="main", help="baseline name; default: main")
+    cmp_p.add_argument(
+        "--practical-floor",
+        type=float,
+        default=0.05,
+        help="mean-diff worse than this triggers regression (default: 0.05 = 5%%)",
+    )
+    cmp_p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="paired-bootstrap RNG seed; pin for reproducibility (default: 42)",
+    )
+    cmp_p.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="optional path to write the markdown report (also printed to stdout)",
+    )
+    cmp_p.set_defaults(func=_cmd_compare)
 
     return parser
 
@@ -520,22 +617,307 @@ async def _run_async(
     return 0
 
 
-def _cmd_baseline_stub(_args: argparse.Namespace) -> int:
-    print(
-        "baseline: not implemented in PR 3b — baseline workflow lands with PR 3c "
-        "once the first real corpus run produces a tagged baseline.",
-        file=sys.stderr,
+def _cmd_baseline(args: argparse.Namespace) -> int:
+    """Run the corpus through the same pipeline as ``run``, then transform the
+    per-run JSON into a baseline file under ``--baseline-dir``.
+
+    The baseline file is a superset of the run JSON: it adds metadata fields
+    (``name``, ``git_sha``, ``prompt_version``, ``model_id``, ``recorded_at``,
+    ``shots_per_case``) so the gate can refuse to compare across incompatible
+    runs (e.g. prompt version changed → numbers aren't apples-to-apples).
+    """
+    # Delegate to the run command (same args), then post-process the JSON
+    # report into a baseline file. Reusing _cmd_run avoids forking the
+    # FastAPI lifespan + cassette + scoring pipeline into a second path.
+    rc = _cmd_run(args)
+    if rc != 0:
+        return rc
+
+    # The run wrote <run_id>.json under args.output_dir; pick the freshest.
+    json_files = sorted(
+        args.output_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
     )
-    return 1
+    if not json_files:
+        print(
+            f"error: baseline: no JSON report under {args.output_dir} after run",
+            file=sys.stderr,
+        )
+        return 1
+    run_json_path = json_files[0]
+
+    import json
+    from datetime import UTC, datetime
+
+    try:
+        settings = load_settings()
+    except Exception as exc:
+        print(f"error: baseline: failed to load settings — {exc}", file=sys.stderr)
+        return 1
+
+    run_blob = json.loads(run_json_path.read_text())
+    baseline = {
+        # Metadata first so it's near the top of the file when reviewed.
+        # `shots_per_case` is deliberately not duplicated here — `run_blob`
+        # already carries the authoritative value the runner actually used,
+        # which can differ from `args.shots` (e.g. the issue #49 collapse).
+        "name": args.name,
+        "git_sha": _git_sha(),
+        "prompt_version": settings.diagnosis_prompt_version,
+        "model_id": settings.anthropic_model,
+        "recorded_at": datetime.now(UTC).isoformat(),
+        # Then the run payload verbatim (per_case, aggregate_metrics, headline).
+        **run_blob,
+    }
+
+    args.baseline_dir.mkdir(parents=True, exist_ok=True)
+    baseline_path = args.baseline_dir / f"{args.name}.json"
+    baseline_path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n")
+    print(f"baseline written: {baseline_path}")
+    return 0
 
 
-def _cmd_compare_stub(_args: argparse.Namespace) -> int:
-    print(
-        "compare-to-baseline: not implemented in PR 3b — wired in PR 3c once the "
-        "first baseline exists.",
-        file=sys.stderr,
+def _cmd_compare(args: argparse.Namespace) -> int:
+    """Compare a run's per-case metrics against a baseline file using the
+    paired-bootstrap regression gate. Exits non-zero on any regression.
+    """
+    import json
+
+    baseline_path: Path = args.baseline or (args.baseline_dir / f"{args.name}.json")
+    if not baseline_path.exists():
+        print(
+            f"error: compare-to-baseline: baseline not found at {baseline_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    run_json_path: Path | None = args.run_json
+    if run_json_path is None:
+        if not args.results_dir.exists():
+            print(
+                f"error: compare-to-baseline: --run-json not given and "
+                f"--results-dir {args.results_dir} does not exist",
+                file=sys.stderr,
+            )
+            return 1
+        json_files = sorted(
+            args.results_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        if not json_files:
+            print(
+                f"error: compare-to-baseline: no *.json in {args.results_dir}",
+                file=sys.stderr,
+            )
+            return 1
+        run_json_path = json_files[0]
+
+    baseline = json.loads(baseline_path.read_text())
+    run = json.loads(run_json_path.read_text())
+
+    verdict, markdown = _compute_regression_verdict(
+        baseline=baseline,
+        run=run,
+        practical_floor=args.practical_floor,
+        seed=args.seed,
+        baseline_label=str(baseline_path),
+        run_label=str(run_json_path),
     )
-    return 1
+    print(markdown)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(markdown)
+
+    return 1 if verdict.has_regression else 0
+
+
+def _compute_regression_verdict(
+    *,
+    baseline: dict[str, object],
+    run: dict[str, object],
+    practical_floor: float,
+    seed: int,
+    baseline_label: str,
+    run_label: str,
+) -> tuple[RegressionVerdict, str]:
+    """Compute the per-metric regression verdict + render the markdown report.
+
+    Factored out so unit tests can hit it without the file-loading dance in
+    _cmd_compare.
+
+    Returns ``(RegressionVerdict, markdown_str)``. The verdict is the typed
+    aggregate; the markdown is the human-readable report (intended for PR
+    comments).
+    """
+    from sentinel.evals.schema import RegressionResult as _RR
+    from sentinel.evals.schema import RegressionVerdict as _RV
+    from sentinel.evals.stats import regression_for_metric
+
+    metrics = ["category_match", "hypothesis_cosine", "action_coverage", "evidence_quality"]
+    # `evidence_quality` flips lower-is-better in the future spec for
+    # hallucinated_evidence_rate, but for now ALL four metrics are
+    # higher-is-better; the schema/spec gate handles the sign flip.
+    higher_is_better = dict.fromkeys(metrics, True)
+
+    # Index per_case by case_id so we can pair shots without assuming order.
+    def _by_case(blob: dict[str, object]) -> dict[str, dict[str, float | None]]:
+        per_case = blob.get("per_case", [])
+        if not isinstance(per_case, list):
+            return {}
+        out: dict[str, dict[str, float | None]] = {}
+        for entry in per_case:
+            if not isinstance(entry, dict):
+                continue
+            cid = entry.get("case_id")
+            metrics_dict = entry.get("metrics")
+            if isinstance(cid, str) and isinstance(metrics_dict, dict):
+                out[cid] = metrics_dict
+        return out
+
+    base_idx = _by_case(baseline)
+    run_idx = _by_case(run)
+    shared_cases = sorted(set(base_idx.keys()) & set(run_idx.keys()))
+    only_in_baseline = sorted(set(base_idx.keys()) - set(run_idx.keys()))
+    only_in_run = sorted(set(run_idx.keys()) - set(base_idx.keys()))
+
+    per_metric: list[_RR] = []
+    for metric in metrics:
+        baseline_vals: list[float] = []
+        current_vals: list[float] = []
+        for cid in shared_cases:
+            b = base_idx[cid].get(metric)
+            c = run_idx[cid].get(metric)
+            if b is None or c is None:
+                # Skip cases where either side is missing this metric — the
+                # paired-bootstrap requires matched pairs. A metric that's
+                # None everywhere will produce zero pairs and the gate
+                # short-circuits to "no signal, no regression".
+                continue
+            baseline_vals.append(float(b))
+            current_vals.append(float(c))
+
+        if not baseline_vals:
+            per_metric.append(
+                _RR(
+                    metric_name=metric,
+                    mean_diff=0.0,
+                    ci_low=0.0,
+                    ci_high=0.0,
+                    is_regression=False,
+                    reason="no paired cases (metric absent on one side)",
+                )
+            )
+            continue
+
+        per_metric.append(
+            regression_for_metric(
+                metric_name=metric,
+                current_per_case=current_vals,
+                baseline_per_case=baseline_vals,
+                seed=seed,
+                practical_floor=practical_floor,
+                higher_is_better=higher_is_better[metric],
+            )
+        )
+
+    verdict = _RV(per_metric=per_metric)
+    markdown = _render_regression_markdown(
+        verdict=verdict,
+        baseline=baseline,
+        baseline_label=baseline_label,
+        run_label=run_label,
+        n_paired=len(shared_cases),
+        only_in_baseline=only_in_baseline,
+        only_in_run=only_in_run,
+    )
+    return verdict, markdown
+
+
+def _render_regression_markdown(
+    *,
+    verdict: RegressionVerdict,
+    baseline: dict[str, object],
+    baseline_label: str,
+    run_label: str,
+    n_paired: int,
+    only_in_baseline: list[str],
+    only_in_run: list[str],
+) -> str:
+    """Render the RegressionVerdict as a markdown table suitable for PR comments.
+
+    Includes the baseline's recorded ``prompt_version`` + ``model_id`` +
+    ``git_sha`` so a reviewer can spot when a PR's bumped prompt is being
+    compared against a stale baseline. The gate doesn't hard-fail on this
+    (corpus + prompt are usually evolved together) but surfacing it lets a
+    careful reader catch apples-to-oranges comparisons.
+    """
+    lines: list[str] = []
+    status = "❌ REGRESSION" if verdict.has_regression else "✅ no regression"
+    lines.append(f"## Eval regression gate: {status}")
+    lines.append("")
+    lines.append(f"- baseline: `{baseline_label}`")
+    lines.append(f"- run: `{run_label}`")
+    lines.append(f"- paired cases: {n_paired}")
+
+    # Baseline provenance — surfaces stale-baseline scenarios.
+    base_meta_bits: list[str] = []
+    for field in ("prompt_version", "model_id", "git_sha", "recorded_at"):
+        val = baseline.get(field)
+        if isinstance(val, str) and val:
+            base_meta_bits.append(f"{field}={val}")
+    if base_meta_bits:
+        lines.append(f"- baseline recorded with: {', '.join(base_meta_bits)}")
+
+    # Case-set drift — silently dropping unpaired cases is exactly how a PR
+    # that deleted/renamed a corpus case could slip past the gate. Loud.
+    if only_in_baseline:
+        lines.append(
+            f"- ⚠️ cases in baseline missing from run "
+            f"(coverage loss, not contributing to the gate): "
+            f"{', '.join(only_in_baseline)}"
+        )
+    if only_in_run:
+        lines.append(
+            f"- info: new cases in run not in baseline "
+            f"(re-run `make evals-baseline` to capture them): "
+            f"{', '.join(only_in_run)}"
+        )
+
+    if verdict.has_regression:
+        lines.append(f"- regressed metrics: {', '.join(verdict.regressed_metrics)}")
+    lines.append("")
+    lines.append("| Metric | mean diff | 95% CI | verdict |")
+    lines.append("|---|---:|---|---|")
+    for r in verdict.per_metric:
+        flag = "❌" if r.is_regression else "✅"
+        lines.append(
+            f"| {r.metric_name} | {r.mean_diff:+.3f} | "
+            f"[{r.ci_low:+.3f}, {r.ci_high:+.3f}] | {flag} {r.reason} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _git_sha() -> str:
+    """Resolve the current git SHA; returns ``"unknown"`` when we're not in a
+    git checkout (e.g. running from a tarball)."""
+    import subprocess
+
+    try:
+        # argv is fixed (no shell interpolation), and `git` is intentionally
+        # resolved via PATH so this works in any dev environment and CI runner
+        # without hard-coding /usr/bin/git or similar.
+        argv = ["git", "rev-parse", "HEAD"]
+        result = subprocess.run(  # noqa: S603
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return result.stdout.strip() or "unknown"
 
 
 def _cmd_readme(args: argparse.Namespace) -> int:

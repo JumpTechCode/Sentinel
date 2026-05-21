@@ -86,18 +86,74 @@ jobs:
         if: always()
         run: docker compose down -v
 
-  evals-smoke:
+  # Full corpus replay + regression gate vs the committed baseline. Named
+  # `evals-gate` (not `evals-smoke`) because it runs the full 10-case corpus,
+  # not just the 5-case `--smoke` subset — the gate's job is to block PRs on
+  # regression, so we want the strongest signal CI can afford. Deterministic
+  # (cassette replay, no API spend), takes <2 minutes including compose boot.
+  evals-gate:
     runs-on: ubuntu-latest
     needs: lint-typecheck-unit
+    # Job-level env so every step (Migrate, evals-reset, evals, compare) sees
+    # the full Settings surface. `load_settings()` enforces several required
+    # fields, not just SENTINEL_POSTGRES_DSN — splitting env per-step would
+    # require duplicating the block and is fragile against new required vars.
+    # SENTINEL_ANTHROPIC_API_KEY is a placeholder — the cassette transport
+    # short-circuits before any real API call, but the Anthropic client
+    # constructor requires a non-empty key.
+    env:
+      SENTINEL_ENV: test
+      SENTINEL_EVAL_MODE: "true"
+      SENTINEL_EVAL_CORPUS_DIR: sentinel/evals/corpus
+      SENTINEL_EVAL_CASSETTE_DIR: sentinel/evals/cassettes
+      SENTINEL_EVAL_CASSETTE_MODE: replay
+      SENTINEL_POSTGRES_DSN: postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel
+      SENTINEL_REDIS_URL: redis://localhost:6379/0
+      SENTINEL_KAFKA_BROKERS: localhost:29092
+      SENTINEL_ANTHROPIC_API_KEY: sk-placeholder-cassette-replay
+      SENTINEL_GENERIC_WEBHOOK_SECRET: ci-eval-secret
+      # fastembed default cache (/var/cache/fastembed) needs root on the CI
+      # runner. Point it at the workspace so the eval scorer can download/
+      # cache the embedding model under a writable path.
+      SENTINEL_EMBEDDING_MODEL_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+
       - run: |
           python -m pip install --upgrade pip wheel
           pip install -e ".[dev]"
-      - name: Evals smoke (placeholder until Work Area K)
-        run: make evals-smoke
+
+      # Bring up the same data tier the integration job uses. Evals replay
+      # cassettes (no Anthropic API call) but the eval CLI runs the full
+      # in-process FastAPI app → real Postgres for incident/diagnosis rows,
+      # real Kafka for the outbox → enrichment → diagnosis round-trip, real
+      # Redis for webhook idempotency. The gate exercises the actual
+      # production pipeline against deterministic responses.
+      - name: Start compose stack
+        run: docker compose up -d --wait postgres redis kafka
+
+      - name: Migrate
+        run: make migrate
+
+      - name: Evals gate (cassette replay + regression gate)
+        run: |
+          make evals-reset
+          make evals
+          make evals-compare
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-gate-results
+          path: evals/results/
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
