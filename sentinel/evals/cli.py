@@ -39,7 +39,6 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import UUID as UUID_t
 
 import httpx
 from pydantic import SecretStr
@@ -95,7 +94,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_p.add_argument("--corpus", type=Path, default=None, help="corpus directory (YAML files)")
-    run_p.add_argument("--shots", type=int, default=3, help="shots per case (default: 3)")
+    run_p.add_argument(
+        "--shots",
+        type=int,
+        default=1,
+        help=(
+            "shots per case (default: 1). Multi-shot is structurally limited by "
+            "the uq_diagnoses_incident_prompt_model uniqueness constraint — "
+            "shots 2+ silently collapse onto shot 0's persisted diagnosis. Set "
+            ">1 only if you've also removed the constraint or arranged for "
+            "per-shot fingerprint divergence."
+        ),
+    )
     run_p.add_argument(
         "--cassette-dir",
         type=Path,
@@ -140,9 +150,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rec_p.add_argument("--corpus", type=Path, default=None, help="corpus directory (YAML files)")
-    # Record shots default to 3 to match the replay default — the cassette
-    # key includes shot_index, so N replay shots need N recorded cassettes.
-    rec_p.add_argument("--shots", type=int, default=3, help="shots per case (default: 3)")
+    # Record shots default to 1 to match the run default. Multi-shot record
+    # is wasteful given the same uq_diagnoses_incident_prompt_model collapse —
+    # only one shot's response actually drives scoring.
+    rec_p.add_argument("--shots", type=int, default=1, help="shots per case (default: 1)")
     rec_p.add_argument(
         "--cassette-dir",
         type=Path,
@@ -431,25 +442,15 @@ async def _run_async(
 
             # Diagnosis repo — distinct session factory from the in-process
             # FastAPI app so the runner's polling doesn't fight the lifespan's
-            # session pool for connections.
+            # session pool for connections. PostgresDiagnosisRepository's
+            # get_by_incident_id satisfies the runner's DiagnosisLookup
+            # Protocol structurally.
             from sqlalchemy.ext.asyncio import async_sessionmaker
 
-            from sentinel.persistence.repositories import fetch_latest_diagnosis_for_eval
+            from sentinel.persistence.repositories import PostgresDiagnosisRepository
 
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
-            # Eval-only DiagnosisLookup adapter — bridges the runner's protocol
-            # to a free function in persistence/ (the "real" get_by_incident_id
-            # method lands in PR 1 / #42). Removed during reconciliation once
-            # both PRs merge.
-            class _EvalDiagnosisLookup:
-                def __init__(self, sf: object) -> None:
-                    self._sf = sf
-
-                async def get_by_incident_id(self, incident_id: UUID_t) -> object:
-                    return await fetch_latest_diagnosis_for_eval(self._sf, incident_id)  # type: ignore[arg-type]
-
-            diagnosis_repo = _EvalDiagnosisLookup(session_factory)
+            diagnosis_repo = PostgresDiagnosisRepository(session_factory)
 
             embed = FastEmbedProvider(
                 model_cache_dir=Path(settings.embedding_model_cache_dir),
@@ -472,24 +473,21 @@ async def _run_async(
                 )
                 return 1
 
-            # TODO: wire to PostgresEvalRunRepository when PR 1 merges; for
-            # now generate a uuid locally and use the report files as the
-            # sole record of the run.
+            # Run id is generated locally; the JSON+MD reports under
+            # --output-dir are the canonical record of the run today. Switching
+            # to PostgresEvalRunRepository requires building out the
+            # ``start_run`` / ``finalize_run`` lifecycle (DB-managed run_id,
+            # corpus_version, fetcher_fixture_hash, git_sha, regression
+            # comparison) — that's a product change (queryable run history),
+            # not a cleanup, and belongs in its own PR.
             run_id = uuid.uuid4()
             shot_persister = _StubShotPersister()
 
             print(f"eval run starting: run_id={run_id} cases={len(cases)} shots={args.shots}")
 
-            # diagnosis_repo: _EvalDiagnosisLookup (above) structurally satisfies
-            # DiagnosisLookup via fetch_latest_diagnosis_for_eval from
-            # persistence/. Cast to DiagnosisLookup for explicit typing.
-            from typing import cast
-
-            from sentinel.evals.runner import DiagnosisLookup
-
             deps = RunnerDeps(
                 client=client,
-                diagnosis_repo=cast(DiagnosisLookup, diagnosis_repo),
+                diagnosis_repo=diagnosis_repo,
                 eval_run_repo=shot_persister,
                 embed=embed,
                 cassette_transport=cassette_transport,
@@ -581,10 +579,17 @@ def _cmd_readme(args: argparse.Namespace) -> int:
 
 
 class _StubShotPersister:
-    """Placeholder until PR 1's ``PostgresEvalRunRepository`` lands.
+    """In-memory persister — keeps the JSON+MD report files as the canonical
+    artifact of an eval run, since the eval CLI doesn't yet construct the
+    surrounding ``start_run``/``finalize_run`` lifecycle that
+    ``PostgresEvalRunRepository.persist_shot`` requires (the row's FK to
+    ``eval_runs.id`` would fail without a matching start_run row).
 
-    Records shots in memory so the runner contract is satisfied; the real
-    persistence happens in the report files emitted at the end of the run.
+    Holds the unified ``EvalCaseResultRecord`` defined in
+    ``sentinel/persistence/repositories.py`` — the duplicate-shape bridge
+    that PR 3b/3c briefly shipped has been removed. Wiring the real
+    repository requires extending the CLI with corpus-version and
+    fetcher-fixture-hash discovery; tracked separately.
     """
 
     def __init__(self) -> None:

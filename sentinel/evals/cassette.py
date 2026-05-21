@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -79,6 +80,19 @@ class CassetteTransport(httpx.AsyncBaseTransport):
         cassette_dir: Path,
         inner_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        # Construction-time prod guard. The transport must never silently
+        # activate outside an eval run or a test suite — a config typo that
+        # flipped settings.eval_mode in production would otherwise replay
+        # stale cassettes (or worse, record over the wire and write to disk).
+        # The eval CLI sets SENTINEL_EVAL_MODE=1 before wiring; pytest sets
+        # PYTEST_CURRENT_TEST. If neither is present, refuse to construct.
+        if not os.environ.get("SENTINEL_EVAL_MODE") and not os.environ.get("PYTEST_CURRENT_TEST"):
+            raise RuntimeError(
+                "CassetteTransport refuses to construct outside an eval run or "
+                "test session: set SENTINEL_EVAL_MODE=1 (eval CLI does this) "
+                "or run under pytest. This is a defense-in-depth guard against "
+                "the transport activating in production via a config typo."
+            )
         self._mode: CassetteMode = mode
         self._cassette_dir = cassette_dir
         self._cassette_dir.mkdir(parents=True, exist_ok=True)
@@ -91,17 +105,17 @@ class CassetteTransport(httpx.AsyncBaseTransport):
         # record mode) the operator must have ANTHROPIC_API_KEY set. Without
         # it, the live call returns 401 and the silent-replay-forever loop
         # would corrupt every future replay run.
-        if mode == "record" and inner_transport is None:
-            import os
-
-            if not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get(
-                "SENTINEL_ANTHROPIC_API_KEY"
-            ):
-                raise RuntimeError(
-                    "CassetteTransport record mode requires ANTHROPIC_API_KEY "
-                    "(or SENTINEL_ANTHROPIC_API_KEY) in the environment; the "
-                    "inner transport would otherwise record a 401 response"
-                )
+        if (
+            mode == "record"
+            and inner_transport is None
+            and not os.environ.get("ANTHROPIC_API_KEY")
+            and not os.environ.get("SENTINEL_ANTHROPIC_API_KEY")
+        ):
+            raise RuntimeError(
+                "CassetteTransport record mode requires ANTHROPIC_API_KEY "
+                "(or SENTINEL_ANTHROPIC_API_KEY) in the environment; the "
+                "inner transport would otherwise record a 401 response"
+            )
         self._context: CassetteContext | None = None
         self._override_key: str | None = None  # test-only escape hatch
 

@@ -43,6 +43,7 @@ class _FakeIncidentRepo:
         self.write_calls = 0
         self.write_status = "written"
         self.incident_present = True
+        self.last_outbox_event: Any = None
 
     async def get(self, incident_id: UUID) -> Any:
         self.get_calls += 1
@@ -66,6 +67,7 @@ class _FakeIncidentRepo:
         outbox_event: Any = None,
     ) -> Any:
         self.write_calls += 1
+        self.last_outbox_event = outbox_event
         from sentinel.persistence.repositories import EnrichmentWriteResult
 
         return EnrichmentWriteResult(status=self.write_status, version=1)  # type: ignore[arg-type]
@@ -174,6 +176,43 @@ async def test_handle_enriched_message_does_not_pollute_invalid_metric() -> None
 
     assert repo.write_calls == 0
     assert after == before, "incident.enriched must not poison the invalid metric"
+
+
+@pytest.mark.asyncio
+async def test_enriched_outbox_payload_includes_fingerprint_and_source() -> None:
+    # Regression: the diagnoser's IncidentEvent envelope requires `fingerprint`
+    # and `source` on every `incident.enriched` message. Earlier the enricher
+    # dropped both fields, so the diagnoser silently failed with
+    # `diagnoser_invalid_envelope` for every real production event — masked in
+    # CI because integration fixtures hand-built events with all fields
+    # populated. Surfaced via the eval harness smoke run on 2026-05-20.
+    repo = _FakeIncidentRepo()
+    consumer = AsyncMock()
+    enricher = EnrichmentConsumer(
+        consumer=consumer,
+        deps=MagicMock(incident_repo=repo),
+        assemble_fn=_passthrough_assemble,
+        topic="sentinel.incidents",
+    )
+
+    envelope_id = uuid4()
+    payload = json.dumps(
+        {
+            "event_id": str(envelope_id),
+            "event": "incident.opened",
+            "incident_id": str(uuid4()),
+            "fingerprint": "fp-deadbeef",
+            "source": "pagerduty",
+            "ts": datetime.now(UTC).isoformat(),
+        }
+    ).encode()
+    await enricher.handle_message(_FakeMsg(value=payload))
+
+    assert repo.last_outbox_event is not None, "outbox event must be emitted"
+    emitted = repo.last_outbox_event.payload
+    assert emitted["event"] == "incident.enriched"
+    assert emitted["fingerprint"] == "fp-deadbeef", "fingerprint must round-trip"
+    assert emitted["source"] == "pagerduty", "source must round-trip"
 
 
 @pytest.mark.asyncio

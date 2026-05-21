@@ -186,41 +186,52 @@ def _run_result_to_markdown(run_result: RunResult) -> str:
     lines.append(f"| evidence_quality | {evidence_str} |")
     lines.append("")
 
-    # Per-case table
+    # Per-case table — stability column only meaningful when shots_per_case > 1
+    # (single shot has no variance to report, so the column is omitted to
+    # avoid implying variance was measured).
+    show_stability = run_result.shots_per_case > 1
     if num_cases > 0:
         lines.append("## Per-case")
         lines.append("")
-        lines.append("| Case | category | hypothesis | actions | evidence | stability |")
-        lines.append("|---|---|---|---|---|---|")
+        if show_stability:
+            lines.append("| Case | category | hypothesis | actions | evidence | stability |")
+            lines.append("|---|---|---|---|---|---|")
+        else:
+            lines.append("| Case | category | hypothesis | actions | evidence |")
+            lines.append("|---|---|---|---|---|")
 
         for case_id in sorted(run_result.per_case_metrics.keys()):
             metrics = run_result.per_case_metrics[case_id]
-            stability = run_result.stability.get(case_id, {})
-
-            # Compute mean stability for this case (avg across 4 metrics)
-            case_stability_vals = list(stability.values())
-            case_stability_mean = (
-                sum(case_stability_vals) / len(case_stability_vals) if case_stability_vals else 0.0
-            )
-
             cat = f"{metrics.category_match:.2f}"
             hyp = f"{metrics.hypothesis_cosine:.2f}"
             act = f"{metrics.action_coverage:.2f}"
             ev_val = (
                 f"{metrics.evidence_quality:.2f}" if metrics.evidence_quality is not None else "—"
             )
-            stab = f"{case_stability_mean:.2f}"
-
-            lines.append(f"| {case_id} | {cat} | {hyp} | {act} | {ev_val} | {stab} |")
+            if show_stability:
+                stability = run_result.stability.get(case_id, {})
+                case_stability_vals = list(stability.values())
+                case_stability_mean = (
+                    sum(case_stability_vals) / len(case_stability_vals)
+                    if case_stability_vals
+                    else 0.0
+                )
+                stab = f"{case_stability_mean:.2f}"
+                lines.append(f"| {case_id} | {cat} | {hyp} | {act} | {ev_val} | {stab} |")
+            else:
+                lines.append(f"| {case_id} | {cat} | {hyp} | {act} | {ev_val} |")
         lines.append("")
 
-    # Headline numbers
+    # Headline numbers (mean_stability only when shots > 1)
     headline = _compute_headline(run_result)
     lines.append("## Headline")
     lines.append("")
     pass_rate_pct = headline["pass_rate_strict"] * 100
     lines.append(f"- pass_rate_strict: {pass_rate_pct:.1f}%")
-    lines.append(f"- mean_stability: {headline['mean_stability']:.3f}")
+    if show_stability:
+        lines.append(f"- mean_stability: {headline['mean_stability']:.3f}")
+    else:
+        lines.append(f"- shots_per_case: {run_result.shots_per_case} (stability not reported)")
     lines.append("")
 
     return "\n".join(lines)

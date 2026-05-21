@@ -65,6 +65,29 @@ def test_active_and_related_alerts_share_the_related_kind() -> None:
     assert len(verdict.verified) == 2
 
 
+def test_bare_id_matches_prefixed_bucket_entry() -> None:
+    # The prompt renders citations as `[deploy:abc]` but real LLM completions
+    # routinely split on the colon and emit `{"kind":"deploy","id":"abc"}`.
+    # That MUST verify against a bucket that holds `"deploy:abc"`, otherwise
+    # evidence_quality collapses to ~0 on every corpus case (eval harness bug
+    # surfaced 2026-05-20).
+    ctx = make_context(deploys=[make_deploy("abc")])
+    diag = _diag(EvidenceRef(kind="deploy", id="abc", note="bare id form"))
+    verdict = verify_evidence(diag, ctx)
+    assert verdict.hallucinated is False
+    assert len(verdict.verified) == 1
+
+
+def test_bare_id_does_not_match_wrong_kind_bucket() -> None:
+    # Lenient match must NOT cross kind boundaries. A bare id "0" claimed as
+    # a deploy must not silently resolve to log:0.
+    ctx = make_context(logs=[make_log(0)])
+    diag = _diag(EvidenceRef(kind="deploy", id="0", note="wrong kind, bare id"))
+    verdict = verify_evidence(diag, ctx)
+    assert verdict.hallucinated is True
+    assert len(verdict.invented) == 1
+
+
 def test_mixed_some_verified_some_invented() -> None:
     deploy = make_deploy("abc")
     similar = make_similar()
