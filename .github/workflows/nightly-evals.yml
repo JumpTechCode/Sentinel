@@ -1,14 +1,23 @@
 name: nightly-evals
 
+# Live-API regression sentinel. Catches drift in the LLM provider (silent
+# Anthropic model updates, latency changes, prompt-handling shifts) that the
+# PR `evals-gate` job — which runs cassette replays — cannot see by design.
+# Daily cadence matches Anthropic's typical deployment window.
+
 on:
   schedule:
-    - cron: "0 6 * * *"   # 06:00 UTC nightly
-  workflow_dispatch:
+    - cron: "0 6 * * *" # 06:00 UTC nightly
+  workflow_dispatch: # also allow ad-hoc triggers from the Actions tab
 
 permissions:
   contents: read
+  issues: write # create / comment / close the eval-drift tracking issue
 
 concurrency:
+  # `cancel-in-progress: false` — if a nightly run is already going when the
+  # scheduled trigger fires, let it finish. Killing it mid-run would burn
+  # API spend without producing a useful signal.
   group: nightly-evals
   cancel-in-progress: false
 
@@ -16,18 +25,184 @@ jobs:
   evals:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
+    # Job-level env so every step (migrate, run, compare, drift-issue) sees
+    # the same Settings surface. Same pattern as the evals-gate job.
+    # SENTINEL_EVAL_CASSETTE_DIR is INTENTIONALLY UNSET — this job hits the
+    # live API. `--live` on the `run` subcommand is the explicit opt-in flag
+    # that confirms we mean it (no cassette dir would otherwise abort).
+    env:
+      SENTINEL_ENV: test
+      SENTINEL_EVAL_MODE: "true"
+      SENTINEL_EVAL_CORPUS_DIR: sentinel/evals/corpus
+      SENTINEL_POSTGRES_DSN: postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel
+      SENTINEL_REDIS_URL: redis://localhost:6379/0
+      SENTINEL_KAFKA_BROKERS: localhost:29092
+      # Note: the secret name (ANTHROPIC_API_KEY) and the runtime env var
+      # name (SENTINEL_ANTHROPIC_API_KEY) intentionally differ — the secret
+      # is named after the upstream API, the env var is namespaced like all
+      # other Sentinel settings. Don't "fix" one to match the other.
+      SENTINEL_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SENTINEL_GENERIC_WEBHOOK_SECRET: nightly-eval-secret
+      SENTINEL_EMBEDDING_MODEL_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # for `gh issue` in the drift step
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+
       - run: |
           python -m pip install --upgrade pip wheel
           pip install -e ".[dev]"
-      - name: Run full evals (placeholder until Work Area K)
+
+      # Fail fast if the secret wasn't set — otherwise the live call would
+      # produce a 401 and we'd waste compose-boot time before figuring out.
+      - name: Verify ANTHROPIC_API_KEY is set
+        run: |
+          if [ -z "$SENTINEL_ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set; nightly cannot hit the live API"
+            exit 1
+          fi
+
+      - name: Start compose stack
+        run: docker compose up -d --wait postgres redis kafka
+
+      - name: Migrate
+        run: make migrate
+
+      # `--live` bypasses cassette interception entirely (real API calls). The
+      # cassette transport refuses to construct without SENTINEL_EVAL_MODE,
+      # but `--live` short-circuits before the transport is built — `run` only
+      # wires it when --cassette-dir is set.
+      - name: Live corpus run
+        run: |
+          make evals-reset
+          python -m sentinel.evals run \
+            --corpus sentinel/evals/corpus \
+            --live \
+            --output-dir evals/results
+
+      # Guard: confirm the live run actually produced a JSON report. If it
+      # crashed (Kafka boot race, schema validation mid-run, Anthropic 5xx
+      # storm) the previous evals-reset wiped the results dir, so the
+      # compare step below would exit 1 from "no JSON files" and the drift-
+      # issue logic would file a misleading regression issue. Fail-fast here
+      # instead — operational failure is NOT model drift.
+      - name: Verify live run produced results
+        run: |
+          if ! ls evals/results/*.json >/dev/null 2>&1; then
+            echo "::error::live corpus run produced no JSON report — see prior step's logs"
+            exit 1
+          fi
+
+      # Compare against the committed baseline. exit-code → regression flag
+      # for the conditional drift-issue step below. The compare command
+      # always prints the markdown to stdout AND writes it to --output, so
+      # we can hand the file to `gh issue` regardless of exit code.
+      #
+      # We treat the compare step's exit code as the regression signal ONLY
+      # if the verdict markdown was actually produced AND contains the
+      # expected header sentinel. Otherwise the non-zero exit came from an
+      # operational failure (baseline missing, JSON malformed) — surface
+      # that as a job failure, not a drift issue.
+      - name: Compare to baseline
+        id: compare
+        run: |
+          set +e
+          python -m sentinel.evals compare-to-baseline \
+            --baseline evals/baselines/main.json \
+            --output evals/results/compare.md
+          EXIT=$?
+          set -e
+          echo "exit_code=$EXIT" >> "$GITHUB_OUTPUT"
+
+          # Operational-failure check: verdict markdown must exist and start
+          # with the gate's known header. If not, this was a tooling crash,
+          # not a regression — fail the job and skip drift-issue logic.
+          if [ ! -s evals/results/compare.md ] || \
+             ! grep -q "Eval regression gate:" evals/results/compare.md; then
+            echo "::error::compare-to-baseline did not produce a valid verdict markdown — operational failure, not regression"
+            exit 1
+          fi
+
+          if [ "$EXIT" -ne 0 ]; then
+            echo "regression_detected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "regression_detected=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload nightly results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-eval-results
+          path: evals/results/
+
+      # Drift issue management. One open issue at a time, labeled `eval-drift`.
+      #   - regression detected, no open issue → create one
+      #   - regression detected, open issue exists → comment with latest verdict
+      #   - no regression, open issue exists → close it ("drift recovered")
+      #   - no regression, no open issue → nothing to do
+      # The label is auto-created on first use via `gh label create` (idempotent).
+      # Idempotent create — silently no-op if the label already exists (avoid
+      # `--force` so we don't churn the label's color/description on every
+      # nightly run and pollute the audit log).
+      - name: Ensure eval-drift label exists
+        if: always()
+        run: |
+          gh label create eval-drift \
+            --color "B60205" \
+            --description "Open when nightly evals show paired-bootstrap regression vs the committed baseline" \
+            2>/dev/null || true
+
+      - name: Manage drift issue
+        if: always()
         env:
-          SENTINEL_ANTHROPIC_API_KEY: ${{ secrets.SENTINEL_ANTHROPIC_API_KEY }}
-        run: make evals
-      # Work Area K adds: upload evals/results/, post a comment with diff vs baseline.
+          REGRESSED: ${{ steps.compare.outputs.regression_detected }}
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh issue list --label eval-drift --state open --json number --jq '.[0].number // ""')
+          DATE_UTC=$(date -u +%Y-%m-%d)
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          if [ "$REGRESSED" = "true" ]; then
+            BODY_FILE=evals/results/compare.md
+            if [ -n "$EXISTING" ]; then
+              echo "## Nightly run ${DATE_UTC} — regression persists" > /tmp/comment.md
+              echo "" >> /tmp/comment.md
+              echo "Workflow run: ${RUN_URL}" >> /tmp/comment.md
+              echo "" >> /tmp/comment.md
+              cat "$BODY_FILE" >> /tmp/comment.md
+              gh issue comment "$EXISTING" --body-file /tmp/comment.md
+              echo "commented on existing drift issue #$EXISTING"
+            else
+              {
+                echo "First detected: nightly run ${DATE_UTC}"
+                echo ""
+                echo "Workflow run: ${RUN_URL}"
+                echo ""
+                cat "$BODY_FILE"
+              } > /tmp/body.md
+              gh issue create \
+                --title "Eval drift detected — ${DATE_UTC}" \
+                --label eval-drift \
+                --body-file /tmp/body.md
+            fi
+          else
+            if [ -n "$EXISTING" ]; then
+              gh issue comment "$EXISTING" --body "Nightly run ${DATE_UTC} — paired-bootstrap gate passed. Closing as recovered. (Workflow run: ${RUN_URL})"
+              gh issue close "$EXISTING" --reason completed
+              echo "closed drift issue #$EXISTING (recovered)"
+            else
+              echo "no regression, no open drift issue — nothing to do"
+            fi
+          fi
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
