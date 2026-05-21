@@ -58,19 +58,34 @@ async def score_action_coverage(d: Diagnosis, gt: GroundTruth, embed: EmbeddingP
 
 
 def score_evidence_quality(d: Diagnosis, ctx: IncidentContext) -> float:
-    """Fraction of EvidenceRef.id values that resolve to a context item.
+    """Fraction of EvidenceRef.id values that resolve to a context item under
+    their declared kind.
 
     This is the strict ID-resolution gate — the production hallucination
     metric (in diagnosis/validation.py) handles the "cited but unsupported"
-    case via confidence capping. PR 2 only scores the deterministic ID match.
+    case via confidence capping. The scorer only counts the deterministic
+    (kind, id) match.
 
     Returns 0.0 if the diagnosis has no evidence at all (the schema enforces
     at least one ref on a parsed Diagnosis, so this branch is defensive).
+
+    Uses the same lenient (kind, id) match as ``verify_evidence`` (see ADR
+    0007): a ref resolves if either its bare id matches the bucket under its
+    declared kind, or its kind-prefixed form matches. The LLM consistently
+    emits bare ids ("abc123") while the context items store the prefixed
+    form ("deploy:abc123"); without the lenient match every cassette-recorded
+    diagnosis would score 0. The bucket is kind-scoped (not a flat set) so
+    wrong-kind references — e.g. ``deploy:0`` claimed for a log line — still
+    register as invented.
     """
     if not d.evidence:
         return 0.0
-    valid_ids = _collect_context_ids(ctx)
-    resolved = sum(1 for e in d.evidence if e.id in valid_ids)
+    buckets = _collect_context_ids_by_kind(ctx)
+    resolved = 0
+    for e in d.evidence:
+        bucket = buckets.get(e.kind, set())
+        if e.id in bucket or f"{e.kind}:{e.id}" in bucket:
+            resolved += 1
     return resolved / len(d.evidence)
 
 
@@ -92,20 +107,21 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return float(dot / (na * nb))
 
 
-def _collect_context_ids(ctx: IncidentContext) -> set[str]:
-    """Walk the full IncidentContext and gather every item.id — the contract
-    the diagnosis prompt + validation gate also rely on."""
-    ids: set[str] = set()
-    for deploy in ctx.recent_deploys.data:
-        ids.add(deploy.id)
-    for alert in ctx.related_alerts.data:
-        ids.add(alert.id)
-    for similar in ctx.similar_incidents.data:
-        ids.add(similar.id)
-    for runbook in ctx.runbooks.data:
-        ids.add(runbook.id)
-    for log in ctx.recent_logs.data:
-        ids.add(log.id)
-    for active in ctx.active_alerts.data:
-        ids.add(active.id)
-    return ids
+def _collect_context_ids_by_kind(ctx: IncidentContext) -> dict[str, set[str]]:
+    """Bucket of {EvidenceKind: {id, ...}} matching the layout that
+    ``verify_evidence`` uses. The scorer reuses this so the lenient match
+    cannot silently cross kind boundaries — see ADR 0007.
+
+    ``related_alert`` aggregates both ``related_alerts`` and ``active_alerts``
+    (same as the validator), since the schema's EvidenceKind enum exposes
+    them as one kind.
+    """
+    return {
+        "deploy": {d.id for d in ctx.recent_deploys.data},
+        "similar_incident": {s.id for s in ctx.similar_incidents.data},
+        "runbook": {r.id for r in ctx.runbooks.data},
+        "log": {lg.id for lg in ctx.recent_logs.data},
+        "related_alert": (
+            {r.id for r in ctx.related_alerts.data} | {a.id for a in ctx.active_alerts.data}
+        ),
+    }

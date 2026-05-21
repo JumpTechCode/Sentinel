@@ -95,7 +95,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_p.add_argument("--corpus", type=Path, default=None, help="corpus directory (YAML files)")
-    run_p.add_argument("--shots", type=int, default=3, help="shots per case (default: 3)")
+    run_p.add_argument(
+        "--shots",
+        type=int,
+        default=1,
+        help=(
+            "shots per case (default: 1). Multi-shot is structurally limited by "
+            "the uq_diagnoses_incident_prompt_model uniqueness constraint — "
+            "shots 2+ silently collapse onto shot 0's persisted diagnosis. Set "
+            ">1 only if you've also removed the constraint or arranged for "
+            "per-shot fingerprint divergence."
+        ),
+    )
     run_p.add_argument(
         "--cassette-dir",
         type=Path,
@@ -140,9 +151,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rec_p.add_argument("--corpus", type=Path, default=None, help="corpus directory (YAML files)")
-    # Record shots default to 3 to match the replay default — the cassette
-    # key includes shot_index, so N replay shots need N recorded cassettes.
-    rec_p.add_argument("--shots", type=int, default=3, help="shots per case (default: 3)")
+    # Record shots default to 1 to match the run default. Multi-shot record
+    # is wasteful given the same uq_diagnoses_incident_prompt_model collapse —
+    # only one shot's response actually drives scoring.
+    rec_p.add_argument("--shots", type=int, default=1, help="shots per case (default: 1)")
     rec_p.add_argument(
         "--cassette-dir",
         type=Path,

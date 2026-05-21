@@ -7,7 +7,7 @@ Public engineering portfolio. Held to a production bar — every external call h
 ## Eval results
 
 <!-- evals:start -->
-_From eval run `6f23b5e8-a72c-4df8-91e6-1adb181fdd51` (auto-generated; do not edit between markers)._
+_From eval run `9a082526-7f96-46ed-af52-887717e2f2d3` (auto-generated; do not edit between markers)._
 
 ## Aggregate Metrics
 
@@ -16,35 +16,33 @@ _From eval run `6f23b5e8-a72c-4df8-91e6-1adb181fdd51` (auto-generated; do not ed
 | category_match | 0.90 |
 | hypothesis_cosine | 0.81 |
 | action_coverage | 0.76 |
-| evidence_quality | 0.00 |
+| evidence_quality | 1.00 |
 
 ## Per-case
 
-| Case | category | hypothesis | actions | evidence | stability |
-|---|---|---|---|---|---|
-| atlassian-2022-04-04-deletion | 1.00 | 0.87 | 0.74 | 0.00 | 0.00 |
-| aws-2021-12-07-useast1 | 1.00 | 0.82 | 0.76 | 0.00 | 0.00 |
-| cloudflare-2019-07-02-regex | 1.00 | 0.80 | 0.76 | 0.00 | 0.00 |
-| cloudflare-2022-06-21-bgp | 1.00 | 0.90 | 0.77 | 0.00 | 0.00 |
-| fastly-2021-06-08-config | 1.00 | 0.75 | 0.85 | 0.00 | 0.00 |
-| github-2018-10-21-network | 0.00 | 0.77 | 0.75 | 0.00 | 0.00 |
-| gitlab-2017-01-31-db-deletion | 1.00 | 0.79 | 0.71 | 0.00 | 0.00 |
-| roblox-2021-10-28-consul | 1.00 | 0.81 | 0.75 | 0.00 | 0.00 |
-| slack-2021-01-04-dns | 1.00 | 0.79 | 0.70 | 0.00 | 0.00 |
-| stripe-2019-07-10-db-failover | 1.00 | 0.85 | 0.77 | 0.00 | 0.00 |
+| Case | category | hypothesis | actions | evidence |
+|---|---|---|---|---|
+| atlassian-2022-04-04-deletion | 1.00 | 0.87 | 0.74 | 1.00 |
+| aws-2021-12-07-useast1 | 1.00 | 0.82 | 0.76 | 1.00 |
+| cloudflare-2019-07-02-regex | 1.00 | 0.80 | 0.76 | 1.00 |
+| cloudflare-2022-06-21-bgp | 1.00 | 0.90 | 0.77 | 1.00 |
+| fastly-2021-06-08-config | 1.00 | 0.75 | 0.85 | 1.00 |
+| github-2018-10-21-network | 0.00 | 0.77 | 0.75 | 1.00 |
+| gitlab-2017-01-31-db-deletion | 1.00 | 0.79 | 0.71 | 1.00 |
+| roblox-2021-10-28-consul | 1.00 | 0.81 | 0.75 | 1.00 |
+| slack-2021-01-04-dns | 1.00 | 0.79 | 0.70 | 1.00 |
+| stripe-2019-07-10-db-failover | 1.00 | 0.85 | 0.77 | 1.00 |
 
 ## Headline
 
-- pass_rate_strict: 0.0%
-- mean_stability: 0.000
+- pass_rate_strict: 90.0%
+- shots_per_case: 1 (stability not reported)
 <!-- evals:end -->
 
-> `evidence_quality=0.00` and `pass_rate_strict=0.0%` reflect a known prompt /
-> validator ID-format mismatch — the LLM cites bare IDs (`may-12-bug`) while
-> the validation gate matches the full prefixed form (`deploy:may-12-bug`).
-> Hits production diagnoses identically; tracked as a follow-up to reconcile
-> the prompt convention with the validator. The category / hypothesis /
-> action numbers above are the real signal.
+> Single shot per case — multi-shot stability is intentionally disabled until
+> the `uq_diagnoses_incident_prompt_model` collapse is resolved (see
+> [ADR 0007](docs/adr/0007-evidence-id-format.md) for the (kind, id) match
+> contract this run relies on).
 
 ## Why it's built this way
 

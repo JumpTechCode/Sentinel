@@ -53,5 +53,16 @@ def verify_evidence(diagnosis: Diagnosis, context: IncidentContext) -> EvidenceV
     invented: list[EvidenceRef] = []
     for ref in diagnosis.evidence:
         bucket = index.get(ref.kind, set())
-        (verified if ref.id in bucket else invented).append(ref)
+        # Accept either bare id ("abc123") or kind-prefixed id ("deploy:abc123").
+        # The prompt renders bracket citations as `[deploy:abc123]`; the LLM
+        # sometimes copies the bracket form verbatim into the id field and
+        # sometimes splits on the colon. Both are equivalent claims about the
+        # same context item, so both count as verified — what matters is that
+        # the (kind, identity) pair resolves to a context item under the
+        # declared kind. Wrong-kind references still fall through to invented.
+        prefixed = f"{ref.kind}:{ref.id}"
+        if ref.id in bucket or prefixed in bucket:
+            verified.append(ref)
+        else:
+            invented.append(ref)
     return EvidenceVerdict(verified=verified, invented=invented)

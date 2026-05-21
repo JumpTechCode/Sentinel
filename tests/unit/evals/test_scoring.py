@@ -320,3 +320,40 @@ def test_score_evidence_quality_zero_when_no_evidence_resolves() -> None:
     d = _build_diagnosis(evidence=[EvidenceRef(kind="deploy", id="deploy:notreal", note="x")])
     score = score_evidence_quality(d, ctx)
     assert score == 0.0
+
+
+def test_score_evidence_quality_accepts_bare_id_against_prefixed_context() -> None:
+    # Regression: the LLM emits `{"kind":"deploy","id":"abc123"}` while context
+    # items store the prefixed form ("deploy:abc123"). Per ADR 0007 the scorer
+    # uses the same lenient (kind, id) match as verify_evidence so cassette-
+    # recorded diagnoses score correctly without re-recording.
+    from sentinel.evals.scoring import score_evidence_quality
+
+    ctx = _empty_context()
+    d = _build_diagnosis(
+        evidence=[
+            EvidenceRef(kind="deploy", id="abc123", note="bare id form"),
+            EvidenceRef(kind="log", id="1", note="bare id form"),
+        ]
+    )
+    score = score_evidence_quality(d, ctx)
+    assert score == 1.0
+
+
+def test_score_evidence_quality_wrong_kind_does_not_resolve_cross_bucket() -> None:
+    # Regression: the lenient (kind, id) match must NOT cross kind boundaries
+    # — same invariant as verify_evidence. A diagnosis that cites
+    # `{"kind":"deploy","id":"log:1"}` (or its bare form) must not silently
+    # resolve to the log entry. ADR 0007 promises this; this test enforces it
+    # against the scorer specifically.
+    from sentinel.evals.scoring import score_evidence_quality
+
+    ctx = _empty_context()
+    d = _build_diagnosis(
+        evidence=[
+            EvidenceRef(kind="deploy", id="log:1", note="wrong kind, prefixed"),
+            EvidenceRef(kind="deploy", id="1", note="wrong kind, bare"),
+        ]
+    )
+    score = score_evidence_quality(d, ctx)
+    assert score == 0.0

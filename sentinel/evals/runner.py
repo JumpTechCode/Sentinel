@@ -187,11 +187,15 @@ class RunnerDeps:
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
-    """What ``run_corpus`` returns — the report writer (T5) renders this."""
+    """What ``run_corpus`` returns — the report writer renders this."""
 
     run_id: UUID
     per_case_metrics: dict[str, MetricSet]
     aggregate_metrics: MetricSet
+    # shots_per_case is recorded on the result so the report can decide
+    # whether the stability column is meaningful (n=1 → no variance to
+    # report; report.py omits the column in that case).
+    shots_per_case: int = 1
     stability: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
@@ -300,6 +304,7 @@ async def run_corpus(
         run_id=runner_deps.run_id,
         per_case_metrics=per_case_metrics,
         aggregate_metrics=_aggregate_run(per_case_metrics),
+        shots_per_case=shots_per_case,
         stability=stability,
     )
 
