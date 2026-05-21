@@ -10,6 +10,7 @@ PIP := $(VENV)/bin/pip
 
 .PHONY: help bootstrap fmt lint typecheck test test-unit test-integration \
         migrate migrate-down evals evals-smoke evals-record evals-baseline \
+        evals-compare evals-reset \
         readme-numbers load chaos compose-up compose-down openapi clean
 
 help:  ## Show available targets
@@ -54,27 +55,30 @@ migrate-down:  ## alembic downgrade -1
 _LOAD_ENV := set -a && [ -f .env ] && . ./.env; set +a
 
 evals-reset:  ## Wipe Kafka topic + Redis + Postgres state between eval runs
-	-docker exec sentinel-kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic sentinel.incidents 2>/dev/null
-	-docker exec sentinel-redis-1 redis-cli FLUSHDB
-	-docker exec sentinel-postgres-1 psql -U sentinel -d sentinel -c "TRUNCATE incidents, diagnoses, outbox_events RESTART IDENTITY CASCADE;"
+	# Use `docker compose exec` (not `docker exec` against hard-coded container
+	# names) so this works regardless of compose project naming (CI's
+	# checkout dir doesn't always produce the same project name as local dev).
+	# Kafka topic delete is tolerated-if-missing — first run has nothing to
+	# delete — but Redis FLUSHDB and Postgres TRUNCATE failures are real and
+	# must surface, so no leading `-` on those.
+	-docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic sentinel.incidents 2>/dev/null
+	docker compose exec -T redis redis-cli FLUSHDB
+	docker compose exec -T postgres psql -U sentinel -d sentinel -c "TRUNCATE incidents, diagnoses, outbox_events RESTART IDENTITY CASCADE;"
 
 evals:  ## Full eval corpus (cassette replay)
 	$(_LOAD_ENV); $(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
 
 evals-smoke:  ## 5-case smoke set (cassette replay)
-	@if [ ! -d sentinel/evals/corpus ] || [ -z "$$(ls sentinel/evals/corpus/*.yaml 2>/dev/null)" ]; then \
-	  echo "evals-smoke: no corpus YAMLs at sentinel/evals/corpus — skipping (corpus lands in PR 3c)"; \
-	elif [ ! -f .env ] && [ ! -f .env.local ] && [ -z "$$SENTINEL_POSTGRES_DSN" ]; then \
-	  echo "evals-smoke: no .env / .env.local / SENTINEL_POSTGRES_DSN — skipping (PR 4 wires CI env)"; \
-	else \
-	  $(_LOAD_ENV); $(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes --smoke; \
-	fi
+	$(_LOAD_ENV); $(PY) -m sentinel.evals run --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes --smoke
+
+evals-compare:  ## Compare the latest run JSON against evals/baselines/main.json (CI gate)
+	$(_LOAD_ENV); $(PY) -m sentinel.evals compare-to-baseline
 
 evals-record:  ## (PR 3c) record cassettes from live API
 	$(_LOAD_ENV); $(PY) -m sentinel.evals record --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
 
-evals-baseline:  ## (PR 3c) tag a baseline corpus run
-	$(PY) -m sentinel.evals baseline --corpus sentinel/evals/corpus --shots 5
+evals-baseline:  ## Write evals/baselines/main.json from a fresh corpus replay
+	$(_LOAD_ENV); $(PY) -m sentinel.evals baseline --corpus sentinel/evals/corpus --cassette-dir sentinel/evals/cassettes
 
 readme-numbers:  ## Patch README between evals:start/end markers from latest run
 	$(PY) -m sentinel.evals readme
