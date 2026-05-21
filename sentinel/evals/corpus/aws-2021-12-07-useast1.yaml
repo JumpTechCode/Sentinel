@@ -1,0 +1,66 @@
+id: aws-2021-12-07-useast1
+corpus_version: 1
+source_url: https://aws.amazon.com/message/12721/
+sources_consulted:
+  - https://aws.amazon.com/message/12721/
+notes: >
+  AWS us-east-1 outage on December 7 2021 caused by a capacity scaling
+  activity that triggered a surge of internal network connections, overwhelming
+  networking devices between the internal and main AWS networks. A latent bug
+  in client backoff logic amplified the congestion into a multi-hour cascade.
+alert:
+  source: generic
+  service: ec2-us-east-1
+  severity: SEV1
+  title: "EC2 API error rate spike — us-east-1 (5xx >40%, resource creation failing)"
+  timestamp: "2021-12-07T15:33:00Z"
+  raw_payload:
+    region: us-east-1
+    service: ec2
+    error_rate_pct: 43.2
+    p99_latency_ms: 12400
+    alert_id: cw-alarm-ec2-api-5xx-useast1-20211207
+    window_minutes: 5
+context_seed:
+  deploys: []
+  recent_logs:
+    - id: log:1
+      timestamp: "2021-12-07T15:30:00Z"
+      level: info
+      service: aws-internal-capacity-scaler
+      message: "Automated scaling activity initiated for internal AWS service in main network"
+    - id: log:2
+      timestamp: "2021-12-07T15:31:00Z"
+      level: warning
+      service: internal-network-device
+      message: "Connection rate to main-network bridge devices rising sharply: 180k conn/s (baseline 12k)"
+    - id: log:3
+      timestamp: "2021-12-07T15:33:00Z"
+      level: error
+      service: ec2-control-plane
+      message: "Elevated 5xx errors and latency on EC2 API; upstream authorization and DNS latency detected"
+    - id: log:4
+      timestamp: "2021-12-07T15:35:00Z"
+      level: error
+      service: internal-network-device
+      message: "Networking devices between internal and main network saturated; retry storm detected — backoff not engaging"
+ground_truth:
+  category: capacity
+  acceptable_categories:
+    - capacity
+    - dependency
+  root_cause: >
+    An automated capacity scaling activity for an internal AWS service triggered
+    a large surge of connection attempts from internal network clients. A latent
+    bug in the clients' backoff logic prevented throttling under congestion,
+    creating a feedback loop that saturated the networking devices bridging the
+    internal and main AWS networks. This knocked out DNS, monitoring, and
+    authorization services, cascading failures across EC2, RDS, ELB, STS, API
+    Gateway, and other us-east-1 services for several hours.
+  correct_actions:
+    - Disable or roll back the triggering automated scaling activity immediately
+    - Isolate high-connection-rate internal clients onto dedicated network devices
+    - Add network capacity to the saturated internal-to-main bridge segment
+    - Deploy network device protections (rate limits, connection caps) to arrest the surge
+    - Patch and redeploy the defective client backoff/retry logic across internal services
+    - Redirect internal DNS traffic to unaffected paths to restore dependent services first

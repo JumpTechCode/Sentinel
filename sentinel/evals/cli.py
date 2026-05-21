@@ -32,12 +32,14 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import re
 import sys
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import UUID as UUID_t
 
 import httpx
 from pydantic import SecretStr
@@ -120,12 +122,43 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_p.set_defaults(func=_cmd_run)
 
-    # record (stub) ---------------------------------------------------------
-    rec_p = sub.add_parser("record", help="(PR 3c) record live cassettes from the corpus")
-    rec_p.add_argument("--corpus", type=Path, default=None)
-    rec_p.add_argument("--shots", type=int, default=1)
-    rec_p.add_argument("--cassette-dir", type=Path, default=None)
-    rec_p.set_defaults(func=_cmd_record_stub)
+    # record ----------------------------------------------------------------
+    # Mirrors `run` orchestration but flips the cassette transport into
+    # record mode (live Anthropic API → write cassette JSON to disk).
+    # Cassette dir is REQUIRED (no --live fallback — recording requires a
+    # target directory) and ANTHROPIC_API_KEY must be set.
+    rec_p = sub.add_parser(
+        "record",
+        help="record live cassettes from the corpus (writes to cassette dir)",
+        description=(
+            "Drives the corpus end-to-end against the live Anthropic API, "
+            "writing the captured HTTP exchanges into --cassette-dir as one "
+            "JSON file per (case, shot). REQUIRES SENTINEL_EVAL_MODE=true, "
+            "SENTINEL_EVAL_CORPUS_DIR, a cassette directory, and "
+            "ANTHROPIC_API_KEY (the inner transport hits the live API). "
+            "Stop the compose 'app' container first."
+        ),
+    )
+    rec_p.add_argument("--corpus", type=Path, default=None, help="corpus directory (YAML files)")
+    # Record shots default to 3 to match the replay default — the cassette
+    # key includes shot_index, so N replay shots need N recorded cassettes.
+    rec_p.add_argument("--shots", type=int, default=3, help="shots per case (default: 3)")
+    rec_p.add_argument(
+        "--cassette-dir",
+        type=Path,
+        default=None,
+        help="cassette write directory; overrides SENTINEL_EVAL_CASSETTE_DIR",
+    )
+    rec_p.add_argument(
+        "--smoke", action="store_true", help="record only the first 5 cases (sorted by id)"
+    )
+    rec_p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("evals/results"),
+        help="where to write the JSON + MD report (record runs also emit a report)",
+    )
+    rec_p.set_defaults(func=_cmd_record)
 
     # baseline (stub) -------------------------------------------------------
     base_p = sub.add_parser("baseline", help="(PR 3c) record a baseline corpus run")
@@ -168,34 +201,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """Run the corpus end-to-end. Returns the process exit code."""
+    """Run the corpus end-to-end (replay mode). Returns the process exit code."""
     try:
         settings = load_settings()
     except Exception as exc:  # pydantic-settings ValidationError, etc.
         print(f"error: failed to load settings — {exc}", file=sys.stderr)
         return 1
 
-    # Eval-mode guard — settings already validates eval_corpus_dir is set when
-    # eval_mode=True, so the only failure here is eval_mode=False.
-    if not settings.eval_mode:
-        print(
-            "error: SENTINEL_EVAL_MODE must be true to run evals "
-            "(set SENTINEL_EVAL_MODE=true and SENTINEL_EVAL_CORPUS_DIR=...)",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Hard guard: without the diagnosis consumer, the lifespan branch never
-    # wraps the AnthropicClient with the cassette transport — the cassette dir
-    # arg would be silently ignored and the runner would attempt live API calls.
-    # Surface this misconfig at startup rather than three minutes into a run.
-    if not settings.diagnosis_consumer_enabled:
-        print(
-            "error: SENTINEL_DIAGNOSIS_CONSUMER_ENABLED must be true for eval runs "
-            "(the cassette transport wraps the AnthropicClient inside the consumer)",
-            file=sys.stderr,
-        )
-        return 1
+    if (rc := _check_common_eval_guards(settings)) is not None:
+        return rc
 
     corpus_dir = args.corpus or settings.eval_corpus_dir
     if corpus_dir is None:
@@ -224,6 +238,120 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
 
 
+def _cmd_record(args: argparse.Namespace) -> int:
+    """Record the corpus end-to-end against the live Anthropic API.
+
+    Reuses the same orchestration as ``_cmd_run`` — the only behavioral
+    difference is the cassette transport mode. We set
+    ``SENTINEL_EVAL_CASSETTE_MODE=record`` in ``os.environ`` BEFORE calling
+    ``load_settings()`` so the lifespan branch in ``sentinel.api.app`` picks
+    up the right mode when it constructs ``CassetteTransport``.
+
+    Additional guards vs. ``run``:
+      * cassette dir REQUIRED (no --live fallback)
+      * ANTHROPIC_API_KEY (or SENTINEL_ANTHROPIC_API_KEY) must be set
+    """
+    # Resolve the cassette dir BEFORE flipping the env var: if the operator
+    # passed --cassette-dir on the CLI we want that value to win, and the
+    # downstream Settings load reads SENTINEL_EVAL_CASSETTE_DIR from env. We
+    # don't need to pre-validate the cassette dir against settings here — we
+    # do that after load_settings() like the other guards.
+    api_key_present = bool(
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("SENTINEL_ANTHROPIC_API_KEY")
+    )
+    if not api_key_present:
+        print(
+            "error: ANTHROPIC_API_KEY (or SENTINEL_ANTHROPIC_API_KEY) must be set for record mode "
+            "(record hits the live Anthropic API; cassette dir captures the exchanges)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Flip the cassette mode BEFORE load_settings() so the lifespan branch in
+    # sentinel.api.app constructs CassetteTransport(mode="record", ...). We
+    # remember the prior value so a caller embedding the CLI can restore it
+    # — important for the test process, which reuses os.environ across cases.
+    prior_mode = os.environ.get("SENTINEL_EVAL_CASSETTE_MODE")
+    os.environ["SENTINEL_EVAL_CASSETTE_MODE"] = "record"
+    try:
+        try:
+            settings = load_settings()
+        except Exception as exc:
+            print(f"error: failed to load settings — {exc}", file=sys.stderr)
+            return 1
+
+        if (rc := _check_common_eval_guards(settings)) is not None:
+            return rc
+
+        corpus_dir = args.corpus or settings.eval_corpus_dir
+        if corpus_dir is None:
+            print("error: --corpus or SENTINEL_EVAL_CORPUS_DIR must be provided", file=sys.stderr)
+            return 1
+
+        cassette_dir = args.cassette_dir or settings.eval_cassette_dir
+        if cassette_dir is None:
+            print(
+                "error: --cassette-dir or SENTINEL_EVAL_CASSETTE_DIR required for record mode "
+                "(recording requires a target directory to write cassette JSON into)",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Ensure the lifespan sees the cassette dir via settings even if the
+        # operator only passed --cassette-dir on the CLI. Settings is frozen
+        # post-construction; the env var is the public knob the lifespan reads.
+        if args.cassette_dir is not None:
+            os.environ["SENTINEL_EVAL_CASSETTE_DIR"] = str(args.cassette_dir)
+            # Re-load so settings.eval_cassette_dir reflects the override.
+            settings = load_settings()
+
+        try:
+            return asyncio.run(_run_async(args, settings, corpus_dir))
+        except CassetteMiss as exc:
+            # CassetteMiss in record mode means the transport refused to write
+            # for some reason (or a code path bypassed record-mode). Surface it.
+            print(f"error: cassette miss during record run — {exc}", file=sys.stderr)
+            return 1
+        except RuntimeError as exc:
+            print(f"error: runtime error during record run — {exc}", file=sys.stderr)
+            return 1
+    finally:
+        if prior_mode is None:
+            os.environ.pop("SENTINEL_EVAL_CASSETTE_MODE", None)
+        else:
+            os.environ["SENTINEL_EVAL_CASSETTE_MODE"] = prior_mode
+
+
+def _check_common_eval_guards(settings: Settings) -> int | None:
+    """Shared guards for ``run`` and ``record``: eval_mode + diagnosis_consumer.
+
+    Returns an exit code (1) when a guard fails, or ``None`` when all pass.
+    Settings already validates ``eval_corpus_dir`` is set when ``eval_mode``
+    is True, so we don't re-check that here.
+    """
+    if not settings.eval_mode:
+        print(
+            "error: SENTINEL_EVAL_MODE must be true to run evals "
+            "(set SENTINEL_EVAL_MODE=true and SENTINEL_EVAL_CORPUS_DIR=...)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Without the diagnosis consumer, the lifespan branch never wraps the
+    # AnthropicClient with the cassette transport — the cassette dir arg
+    # would be silently ignored and the runner would attempt live API calls
+    # (or fail to write cassettes in record mode). Surface this at startup.
+    if not settings.diagnosis_consumer_enabled:
+        print(
+            "error: SENTINEL_DIAGNOSIS_CONSUMER_ENABLED must be true for eval runs "
+            "(the cassette transport wraps the AnthropicClient inside the consumer)",
+            file=sys.stderr,
+        )
+        return 1
+
+    return None
+
+
 async def _run_async(
     args: argparse.Namespace,
     settings: Settings,
@@ -242,6 +370,16 @@ async def _run_async(
     if not cases:
         print(f"error: no corpus cases found in {corpus_dir}", file=sys.stderr)
         return 1
+
+    # Kafka topic reset (stale-message hygiene) is intentionally NOT
+    # automated inside the CLI: doing it correctly requires a Kafka admin
+    # client + a wait for the delete to propagate before the producer
+    # subscribes, and getting that race right is fragile. The eval workflow
+    # instead expects the operator to run `make evals-reset` before
+    # `make evals-record` / `make evals` — a 3-line shell target that
+    # deletes the topic + flushes Redis + truncates Postgres.
+    # See plans/2026-05-20-eval-harness-pr3c-corpus-plan.md Task 3 for
+    # the canonical recipe.
 
     # Build the FastAPI app via the same factory uvicorn would use.
 
@@ -267,26 +405,51 @@ async def _run_async(
 
             engine = create_async_engine(settings.postgres_dsn, future=True)
 
-            # Truncate helper — raw SQL lives in persistence/ to honor the
-            # no-raw-SQL-outside-persistence project invariant.
+            # truncate_between_cases is a no-op in eval mode. We used to
+            # TRUNCATE incidents/diagnoses + FLUSHDB Redis here, but:
+            #
+            # 1. The runner now uses per-shot external_ids
+            #    (`{case.id}-shot-{i}`) so every (case, shot) tuple creates a
+            #    unique incident → no Postgres collisions across cases.
+            #    Redis dedup keys derive from sha256(body), and the body
+            #    contains the unique id → no false-duplicates either.
+            # 2. Truncating between cases while the diagnoser is still
+            #    processing the previous case's events RACES with the
+            #    diagnoser's insert — causing
+            #    `diagnoses_incident_id_fkey` FK violations when the
+            #    incident is gone before the diagnosis row commits.
+            # 3. Between RUNS, `make evals-reset` does the full wipe; that
+            #    handles the only state-pollution concern that remains.
             from sqlalchemy.ext.asyncio import async_sessionmaker as _amsf
 
-            from sentinel.persistence.repositories import truncate_eval_runtime_state
-
-            _truncate_factory = _amsf(engine, expire_on_commit=False)
+            _truncate_factory = _amsf(engine, expire_on_commit=False)  # kept for the
+            # diagnosis repo session factory below
 
             async def _truncate() -> None:
-                await truncate_eval_runtime_state(_truncate_factory)
+                # Intentionally a no-op; see comment above.
+                return None
 
             # Diagnosis repo — distinct session factory from the in-process
             # FastAPI app so the runner's polling doesn't fight the lifespan's
             # session pool for connections.
             from sqlalchemy.ext.asyncio import async_sessionmaker
 
-            from sentinel.persistence.repositories import PostgresDiagnosisRepository
+            from sentinel.persistence.repositories import fetch_latest_diagnosis_for_eval
 
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
-            diagnosis_repo = PostgresDiagnosisRepository(session_factory)
+
+            # Eval-only DiagnosisLookup adapter — bridges the runner's protocol
+            # to a free function in persistence/ (the "real" get_by_incident_id
+            # method lands in PR 1 / #42). Removed during reconciliation once
+            # both PRs merge.
+            class _EvalDiagnosisLookup:
+                def __init__(self, sf: object) -> None:
+                    self._sf = sf
+
+                async def get_by_incident_id(self, incident_id: UUID_t) -> object:
+                    return await fetch_latest_diagnosis_for_eval(self._sf, incident_id)  # type: ignore[arg-type]
+
+            diagnosis_repo = _EvalDiagnosisLookup(session_factory)
 
             embed = FastEmbedProvider(
                 model_cache_dir=Path(settings.embedding_model_cache_dir),
@@ -317,11 +480,9 @@ async def _run_async(
 
             print(f"eval run starting: run_id={run_id} cases={len(cases)} shots={args.shots}")
 
-            # diagnosis_repo: PostgresDiagnosisRepository doesn't formally
-            # implement the runner's DiagnosisLookup protocol today (the prod
-            # interface lacks ``get_by_incident_id``). The Postgres impl will
-            # carry the method once PR 1 lands; cast for now so mypy passes
-            # without polluting the prod interface.
+            # diagnosis_repo: _EvalDiagnosisLookup (above) structurally satisfies
+            # DiagnosisLookup via fetch_latest_diagnosis_for_eval from
+            # persistence/. Cast to DiagnosisLookup for explicit typing.
             from typing import cast
 
             from sentinel.evals.runner import DiagnosisLookup
@@ -359,16 +520,6 @@ async def _run_async(
     print(f"  json: {json_path}")
     print(f"  md:   {md_path}")
     return 0
-
-
-def _cmd_record_stub(_args: argparse.Namespace) -> int:
-    print(
-        "record: not implemented in PR 3b — use manual record flow until PR 3c lands.\n"
-        "  See plans/2026-05-20-eval-harness-design.md §3 for the manual recording "
-        "instructions; PR 3c wires this subcommand to the live-API path.",
-        file=sys.stderr,
-    )
-    return 1
 
 
 def _cmd_baseline_stub(_args: argparse.Namespace) -> int:
@@ -460,9 +611,15 @@ def _extract_headline_summary(md_path: Path) -> str:
     last 10 lines of the file if no headline section is found.
     """
     text = md_path.read_text()
-    headline_marker = "## Headline"
-    if headline_marker in text:
-        body = text[text.index(headline_marker) :].rstrip()
+    # Lift the "## Aggregate Metrics" block + everything through end-of-file
+    # (so Headline and any future trailing sections come along). The Per-case
+    # table sits between — it's verbose but useful for a portfolio reader
+    # checking the headline numbers against per-case detail.
+    agg_marker = "## Aggregate Metrics"
+    if agg_marker in text:
+        body = text[text.index(agg_marker) :].rstrip()
+    elif "## Headline" in text:
+        body = text[text.index("## Headline") :].rstrip()
     else:
         body = "\n".join(text.splitlines()[-10:])
 

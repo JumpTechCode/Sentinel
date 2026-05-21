@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     eval_mode: bool = False
     eval_corpus_dir: Path | None = None  # required when eval_mode=True
     eval_cassette_dir: Path | None = None  # if set, AnthropicClient uses cassette transport
+    # Cassette transport mode. "replay" reads existing cassettes from disk; "record"
+    # hits the live Anthropic API and writes captured exchanges into eval_cassette_dir.
+    # Default "replay" preserves existing PR 3b behavior; the `record` CLI subcommand
+    # sets SENTINEL_EVAL_CASSETTE_MODE=record in os.environ before constructing the
+    # app so the lifespan picks it up at startup.
+    eval_cassette_mode: Literal["record", "replay"] = "replay"
 
     @model_validator(mode="after")
     def _eval_mode_requires_corpus_dir(self) -> Settings:

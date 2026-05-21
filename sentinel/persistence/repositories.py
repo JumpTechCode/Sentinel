@@ -1425,6 +1425,48 @@ def _eval_run_record_from_model(row: EvalRunModel) -> EvalRunRecord:
     )
 
 
+async def fetch_latest_diagnosis_for_eval(
+    session_factory: async_sessionmaker[AsyncSession],
+    incident_id: UUID,
+) -> PersistedDiagnosis | None:
+    """Eval-runner polling helper — most-recent persisted diagnosis for an
+    incident, or None if no diagnosis row has landed yet.
+
+    Redundant after PR 1 added ``DiagnosisRepository.get_by_incident_id``;
+    kept here only because the PR 3c CLI imports it via the
+    ``_EvalDiagnosisLookup`` adapter. Drop both during the post-merge
+    reconciliation PR.
+    """
+    from sqlalchemy import desc
+
+    from sentinel.schemas.diagnosis import EvidenceRef, SuggestedAction
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                select(DiagnosisModel)
+                .where(DiagnosisModel.incident_id == incident_id)
+                .order_by(desc(DiagnosisModel.created_at))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return PersistedDiagnosis(
+            hypothesis=row.hypothesis,
+            confidence=row.confidence,
+            reasoning=row.reasoning,
+            evidence=[EvidenceRef.model_validate(e) for e in row.evidence],
+            suggested_actions=[SuggestedAction.model_validate(a) for a in row.suggested_actions],
+            likely_category=cast(Any, row.likely_category),
+            hallucinated_evidence=row.hallucinated_evidence,
+            model=row.model,
+            prompt_version=row.prompt_version,
+            latency_ms=row.latency_ms,
+            token_usage=row.token_usage,
+        )
+
+
 async def truncate_eval_runtime_state(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1470,5 +1512,6 @@ __all__ = [
     "RunbookRepository",
     "SimilarIncidentRow",
     "StoredEnrichmentContext",
+    "fetch_latest_diagnosis_for_eval",
     "truncate_eval_runtime_state",
 ]

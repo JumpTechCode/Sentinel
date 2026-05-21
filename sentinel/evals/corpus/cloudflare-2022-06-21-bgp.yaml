@@ -1,0 +1,68 @@
+id: cloudflare-2022-06-21-bgp
+corpus_version: 1
+source_url: https://blog.cloudflare.com/cloudflare-outage-on-june-21-2022/
+sources_consulted:
+  - https://blog.cloudflare.com/cloudflare-outage-on-june-21-2022/
+notes: |
+  BGP policy term reordering with a clear causal chain, precise timeline, and
+  documented remediation — ideal for testing config-change attribution and
+  evidence-citation quality.
+alert:
+  source: generic
+  service: edge-network
+  severity: SEV1
+  title: Global traffic drop across 19 Multi-Colo PoPs — elevated 5xx and reachability loss
+  timestamp: "2022-06-21T06:27:00Z"
+  raw_payload:
+    error_rate: 0.50
+    affected_pops: 19
+    traffic_loss_pct: 50
+    alert_source: internal-monitoring
+    region: global
+context_seed:
+  deploys:
+    - id: deploy:bgp-mcp-policy-reorder
+      service: edge-network
+      sha: bgp-mcp-policy-reorder
+      pr_title: Standardize BGP communities on MCP spine routers
+      pr_diff_summary: >
+        Reordered BGP policy statement terms on MCP spine routers to add
+        informational communities to site-local prefixes. The reorder placed
+        REJECT-THE-REST before 4-ADV-SITE-LOCALS and 6-ADV-SITE-LOCALS,
+        causing site-local prefixes to be withdrawn from advertisement.
+      deployed_at: "2022-06-21T06:27:00Z"
+  recent_logs:
+    - id: log:1
+      timestamp: "2022-06-21T06:27:03Z"
+      level: error
+      service: edge-network
+      message: "BGP policy applied to spine routers: site-local prefix advertisement withdrawn (REJECT-THE-REST evaluated before 4-ADV-SITE-LOCALS)"
+    - id: log:2
+      timestamp: "2022-06-21T06:27:15Z"
+      level: critical
+      service: edge-network
+      message: "Reachability lost to site-local prefixes across MCP-enabled data centers; traffic drop detected in AMS, ATL, IAD, ORD, FRA, LHR, LAX"
+    - id: log:3
+      timestamp: "2022-06-21T06:32:00Z"
+      level: critical
+      service: edge-network
+      message: "Internal incident declared: 19 POPs unreachable, approximately 50% of global HTTP traffic affected"
+    - id: log:4
+      timestamp: "2022-06-21T06:58:00Z"
+      level: info
+      service: edge-network
+      message: "Root cause identified: BGP policy term reordering on MCP spines; reversion of bgp-mcp-policy-reorder initiated"
+ground_truth:
+  category: config
+  acceptable_categories:
+    - config
+    - deploy
+  root_cause: >
+    A BGP policy configuration change on Multi-Colo PoP spine routers reordered
+    policy statement terms, placing REJECT-THE-REST before the site-local
+    advertisement terms, causing all site-local prefixes to be withdrawn and
+    dropping ~50% of global traffic across 19 data centers.
+  correct_actions:
+    - Revert the BGP policy term reordering on MCP spine routers to restore site-local prefix advertisement
+    - Introduce MCP data centers earlier in the stagger rollout sequence to catch per-MCP failures before global propagation
+    - Implement automated rollback triggered by traffic-drop signal within the change window

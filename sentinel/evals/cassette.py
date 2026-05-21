@@ -151,10 +151,14 @@ class CassetteTransport(httpx.AsyncBaseTransport):
         body = await response.aread()
         _write_cassette(path, key=key, request=request, response=response, body=body)
         # Return a fresh response with the captured body (the original stream
-        # has been drained by .aread()).
+        # has been drained by .aread()). Strip transport-encoding headers —
+        # `aread()` returns already-decoded bytes, so retaining e.g.
+        # `content-encoding: gzip` would make httpx try to decompress
+        # already-decompressed bytes downstream (zlib "incorrect header check"
+        # → APIConnectionError in the Anthropic SDK).
         return httpx.Response(
             status_code=response.status_code,
-            headers=response.headers,
+            headers=_strip_transport_headers(response.headers),
             content=body,
             request=request,
         )
@@ -163,12 +167,38 @@ class CassetteTransport(httpx.AsyncBaseTransport):
 # --- helpers ---
 
 
+def _strip_transport_headers(
+    headers: httpx.Headers | list[list[str]] | list[tuple[bytes, bytes]],
+) -> list[tuple[str, str]]:
+    """Drop `content-encoding` and `content-length` from the header set so the
+    decoded body we hand back to httpx isn't re-decoded / mis-counted.
+
+    Accepts httpx.Headers, the JSON-serialized list-of-lists form from
+    cassette files, or the raw bytes-tuple form from a live response.
+    """
+    out: list[tuple[str, str]] = []
+    drop = {"content-encoding", "content-length"}
+    iterable: list[tuple[str, str]] = []
+    if isinstance(headers, httpx.Headers):
+        iterable = list(headers.items())
+    else:
+        for k, v in headers:
+            ks = k.decode() if isinstance(k, bytes) else str(k)
+            vs = v.decode() if isinstance(v, bytes) else str(v)
+            iterable.append((ks, vs))
+    for k, v in iterable:
+        if k.lower() in drop:
+            continue
+        out.append((k, v))
+    return out
+
+
 def _response_from_cassette(path: Path) -> httpx.Response:
     payload = json.loads(path.read_text())
     body = base64.b64decode(payload["response"]["body_b64"])
     return httpx.Response(
         status_code=payload["response"]["status_code"],
-        headers=payload["response"]["headers"],
+        headers=_strip_transport_headers(payload["response"]["headers"]),
         content=body,
     )
 

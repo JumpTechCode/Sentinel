@@ -1,11 +1,16 @@
 """Unit tests for ``sentinel.evals.cli``.
 
-Four tests per the PR 3b plan §Task 6:
+Coverage:
 
-1. ``test_run_requires_eval_mode_true`` — invoking ``run`` with
-   ``SENTINEL_EVAL_MODE=false`` exits 1 with a clear stderr message.
-2. ``test_record_subcommand_is_a_stub`` — exits 1 with the stub message.
-3. ``test_baseline_subcommand_is_a_stub`` — same.
+1. ``test_run_requires_eval_mode_true`` — ``run`` with ``SENTINEL_EVAL_MODE``
+   unset exits 1 with a clear stderr message.
+2. ``record`` guards (three tests; happy path is exercised in Task 3 against
+   the live API, not here):
+   * ``test_record_requires_eval_mode`` — eval_mode=False → exit 1.
+   * ``test_record_requires_cassette_dir`` — no cassette dir → exit 1.
+   * ``test_record_requires_api_key`` — no ANTHROPIC_API_KEY → exit 1.
+3. ``test_baseline_subcommand_is_a_stub``, ``test_compare_to_baseline_is_a_stub``
+   — both still PR-3c-deferred stubs.
 4. ``test_readme_patches_between_markers`` — patches a temp README between the
    ``<!-- evals:start --> .. <!-- evals:end -->`` markers using a fake result
    MD file written into the fallback ``--results-dir``.
@@ -64,14 +69,123 @@ def test_run_requires_eval_mode_true(
     assert "eval_mode" in captured.err.lower() or "true" in captured.err.lower()
 
 
-def test_record_subcommand_is_a_stub(capsys: pytest.CaptureFixture[str]) -> None:
-    """`record` exits 1 with a clear "not implemented in PR 3b" message."""
+def _set_baseline_env(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    eval_mode: bool,
+    eval_corpus_dir: Path | None,
+    api_key_present: bool,
+    cassette_dir: Path | None = None,
+) -> None:
+    """Common env setup for record guard tests — Settings needs these to
+    validate. The API key here is the one used by the *Anthropic client* (a
+    SecretStr required by Settings); the separate ANTHROPIC_API_KEY env var
+    is what the record subcommand checks for live-API access."""
+    monkeypatch.setenv("SENTINEL_POSTGRES_DSN", "postgresql+asyncpg://localhost/test")
+    monkeypatch.setenv("SENTINEL_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("SENTINEL_KAFKA_BROKERS", "localhost:9092")
+    # Settings requires SENTINEL_ANTHROPIC_API_KEY; the record subcommand
+    # checks ANTHROPIC_API_KEY (or SENTINEL_ANTHROPIC_API_KEY) separately
+    # as a "live API access available?" gate. Set the Settings field
+    # unconditionally so load_settings() doesn't fail for unrelated reasons.
+    monkeypatch.setenv("SENTINEL_ANTHROPIC_API_KEY", "test-settings-key")
+    monkeypatch.setenv("SENTINEL_ENV", "test")
+    monkeypatch.setenv("SENTINEL_EVAL_MODE", "true" if eval_mode else "false")
+    if eval_corpus_dir is not None:
+        monkeypatch.setenv("SENTINEL_EVAL_CORPUS_DIR", str(eval_corpus_dir))
+    else:
+        monkeypatch.delenv("SENTINEL_EVAL_CORPUS_DIR", raising=False)
+    if cassette_dir is not None:
+        monkeypatch.setenv("SENTINEL_EVAL_CASSETTE_DIR", str(cassette_dir))
+    else:
+        monkeypatch.delenv("SENTINEL_EVAL_CASSETTE_DIR", raising=False)
+    # Ensure no stale cassette mode env from a prior test in the same process.
+    monkeypatch.delenv("SENTINEL_EVAL_CASSETTE_MODE", raising=False)
+    if api_key_present:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-live-test")
+    else:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        # SENTINEL_ANTHROPIC_API_KEY is also accepted by the record guard,
+        # so we'd have to clear it to test the "missing" branch — but the
+        # Settings load needs it. Tests that exercise the api-key guard
+        # are responsible for clearing this in-test after _set_baseline_env.
+
+
+def test_record_requires_eval_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """`record` exits 1 with a clear stderr message when eval_mode is off."""
+    _set_baseline_env(
+        monkeypatch,
+        eval_mode=False,
+        eval_corpus_dir=tmp_path,
+        api_key_present=True,
+        cassette_dir=tmp_path,
+    )
+
     code = _run_main(["record"])
     assert code == 1
 
     captured = capsys.readouterr()
-    assert "PR 3" in captured.err
-    assert "record" in captured.err.lower()
+    assert "SENTINEL_EVAL_MODE" in captured.err
+
+
+def test_record_requires_cassette_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """`record` exits 1 when neither --cassette-dir nor SENTINEL_EVAL_CASSETTE_DIR is set."""
+    _set_baseline_env(
+        monkeypatch,
+        eval_mode=True,
+        eval_corpus_dir=tmp_path,
+        api_key_present=True,
+        cassette_dir=None,
+    )
+
+    code = _run_main(["record"])
+    assert code == 1
+
+    captured = capsys.readouterr()
+    assert "cassette" in captured.err.lower()
+
+
+def test_record_requires_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """`record` exits 1 when neither ANTHROPIC_API_KEY nor SENTINEL_ANTHROPIC_API_KEY is set.
+
+    The record api-key guard accepts either env var (SENTINEL_ANTHROPIC_API_KEY
+    is the Settings field; ANTHROPIC_API_KEY is the conventional name). Both
+    must be absent for the guard to fire. This guard runs *before*
+    load_settings(), so the Settings-required SENTINEL_ANTHROPIC_API_KEY
+    being missing doesn't bypass the message — the record-specific error
+    surfaces first.
+    """
+    _set_baseline_env(
+        monkeypatch,
+        eval_mode=True,
+        eval_corpus_dir=tmp_path,
+        api_key_present=False,
+        cassette_dir=tmp_path,
+    )
+    # Clear the Settings-side env var too so the "neither is set" branch
+    # actually fires. The record guard runs before load_settings(), so
+    # there's no chicken-and-egg with the required Settings field here.
+    monkeypatch.delenv("SENTINEL_ANTHROPIC_API_KEY", raising=False)
+
+    code = _run_main(["record"])
+    assert code == 1
+
+    captured = capsys.readouterr()
+    # The record-specific message includes "ANTHROPIC_API_KEY" and "record mode".
+    assert "ANTHROPIC_API_KEY" in captured.err
+    assert "record mode" in captured.err.lower()
 
 
 def test_baseline_subcommand_is_a_stub(capsys: pytest.CaptureFixture[str]) -> None:
