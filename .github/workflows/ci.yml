@@ -94,6 +94,24 @@ jobs:
   evals-gate:
     runs-on: ubuntu-latest
     needs: lint-typecheck-unit
+    # Job-level env so every step (Migrate, evals-reset, evals, compare) sees
+    # the full Settings surface. `load_settings()` enforces several required
+    # fields, not just SENTINEL_POSTGRES_DSN — splitting env per-step would
+    # require duplicating the block and is fragile against new required vars.
+    # SENTINEL_ANTHROPIC_API_KEY is a placeholder — the cassette transport
+    # short-circuits before any real API call, but the Anthropic client
+    # constructor requires a non-empty key.
+    env:
+      SENTINEL_ENV: test
+      SENTINEL_EVAL_MODE: "true"
+      SENTINEL_EVAL_CORPUS_DIR: sentinel/evals/corpus
+      SENTINEL_EVAL_CASSETTE_DIR: sentinel/evals/cassettes
+      SENTINEL_EVAL_CASSETTE_MODE: replay
+      SENTINEL_POSTGRES_DSN: postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel
+      SENTINEL_REDIS_URL: redis://localhost:6379/0
+      SENTINEL_KAFKA_BROKERS: localhost:29092
+      SENTINEL_ANTHROPIC_API_KEY: sk-placeholder-cassette-replay
+      SENTINEL_GENERIC_WEBHOOK_SECRET: ci-eval-secret
     steps:
       - uses: actions/checkout@v4
 
@@ -117,25 +135,9 @@ jobs:
         run: docker compose up -d --wait postgres redis kafka
 
       - name: Migrate
-        env:
-          SENTINEL_POSTGRES_DSN: postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel
         run: make migrate
 
-      # Cassette replay + regression gate against the committed baseline.
-      # SENTINEL_ANTHROPIC_API_KEY is a placeholder — the cassette transport
-      # short-circuits before any real API call, but the Anthropic client
-      # constructor requires a non-empty key.
       - name: Evals gate (cassette replay + regression gate)
-        env:
-          SENTINEL_EVAL_MODE: "true"
-          SENTINEL_EVAL_CORPUS_DIR: sentinel/evals/corpus
-          SENTINEL_EVAL_CASSETTE_DIR: sentinel/evals/cassettes
-          SENTINEL_EVAL_CASSETTE_MODE: replay
-          SENTINEL_POSTGRES_DSN: postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel
-          SENTINEL_REDIS_URL: redis://localhost:6379/0
-          SENTINEL_KAFKA_BROKERS: localhost:29092
-          SENTINEL_ANTHROPIC_API_KEY: sk-placeholder-cassette-replay
-          SENTINEL_GENERIC_WEBHOOK_SECRET: ci-eval-secret
         run: |
           make evals-reset
           make evals
