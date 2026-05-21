@@ -44,10 +44,10 @@ test-integration:  ## pytest integration tests (requires docker; coverage gate i
 	$(VENV)/bin/pytest tests/integration -v -m integration --no-cov
 
 migrate:  ## alembic upgrade head
-	$(VENV)/bin/alembic upgrade head
+	$(PY) -m alembic upgrade head
 
 migrate-down:  ## alembic downgrade -1
-	$(VENV)/bin/alembic downgrade -1
+	$(PY) -m alembic downgrade -1
 
 # Eval targets source .env into the shell so vars not loaded by pydantic-settings
 # (e.g. ANTHROPIC_API_KEY used by the cassette transport's record-mode guard
