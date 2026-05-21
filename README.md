@@ -7,7 +7,7 @@ Public engineering portfolio. Held to a production bar — every external call h
 ## Eval results
 
 <!-- evals:start -->
-_From eval run `9a082526-7f96-46ed-af52-887717e2f2d3` (auto-generated; do not edit between markers)._
+_From eval run `4388e5a6-e2ef-437f-8683-8a096f602976` (auto-generated; do not edit between markers)._
 
 ## Aggregate Metrics
 

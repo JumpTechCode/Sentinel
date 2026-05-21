@@ -54,7 +54,7 @@ from typing import Any, Literal, Protocol
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import SecretStr
 
 from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.enrichment.protocols import EmbeddingProvider
@@ -70,6 +70,7 @@ from sentinel.evals.scoring import (
 from sentinel.ingestion.fingerprint import fingerprint as compute_fingerprint
 from sentinel.ingestion.fingerprint import normalize_title
 from sentinel.integrations.base import compute_hmac_sha256
+from sentinel.persistence.repositories import EvalCaseResultRecord
 from sentinel.schemas.context import (
     DeployItem,
     FetcherResult,
@@ -131,32 +132,10 @@ class HttpPoster(Protocol):
     ) -> httpx.Response: ...
 
 
-# --- Public schema --------------------------------------------------------- #
-
-
-class EvalCaseResultRecord(BaseModel):
-    """One row in the per-shot result table — persisted to ``eval_case_results``.
-
-    ``metrics`` is a flat dict (rather than a MetricSet) because the persistence
-    layer stores it as JSONB; the field order/typing is enforced by the runner
-    that constructs it, not by the DB.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    run_id: UUID
-    case_id: str = Field(min_length=1)
-    shot_index: int = Field(ge=0)
-    case_status: CaseStatus
-    metrics: dict[str, float | None]
-    diagnosis: dict[str, Any] | None = None
-    incident_id: UUID | None = None
-    incident_fingerprint: str
-    incident_title: str
-    incident_severity: str
-    token_usage: dict[str, Any] | None = None
-    latency_ms: int | None = None
-    error_detail: str | None = None
+# EvalCaseResultRecord is re-exported below from sentinel.persistence.repositories.
+# The runner constructs it directly; PostgresEvalRunRepository stores it directly.
+# Keeping it canonical in persistence avoids the duplicate-type bridge that the
+# original PR 3b/3c interim shipped.
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +252,7 @@ async def run_corpus(
                         "action_coverage": metrics.action_coverage,
                         "evidence_quality": metrics.evidence_quality,
                     },
+                    raw_response=None,
                     diagnosis=_persisted_to_dict(diagnosis) if diagnosis is not None else None,
                     incident_id=incident_id,
                     incident_fingerprint=compute_fingerprint(
@@ -336,12 +316,16 @@ async def _fire_and_poll(
     # enricher's incident lookup. The fingerprint
     # (sha256(service||title||severity)) is still constant per case, but the
     # external_id makes each row distinct.
+    # raw_payload spread FIRST so the runner's controlled fields below always
+    # win — otherwise a corpus YAML that happened to include `id:` (or
+    # `service:`, `severity:`, `title:`) in raw_payload would silently shadow
+    # the per-shot identity and collapse shots 2+ onto shot 0's incident row.
     payload: dict[str, object] = {
+        **case.alert.raw_payload,
         "id": f"{case.id}-shot-{shot_index}",
         "service": case.alert.service,
         "severity": case.alert.severity,
         "title": case.alert.title,
-        **case.alert.raw_payload,
     }
     # Serialize ourselves and POST the exact bytes we sign — the alternative
     # (json=payload) lets httpx pick separators that may differ from what

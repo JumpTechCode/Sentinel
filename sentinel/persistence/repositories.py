@@ -161,16 +161,24 @@ class EvalRunRecord:
 class EvalCaseResultRecord:
     """A persisted per-shot case result as exposed to callers (immutable snapshot).
 
-    incident_fingerprint/title/severity are denormalised from the incident at
-    write time so results remain self-contained after the runner truncates
-    the incidents table between cases.
+    Single source of truth — the runner constructs this directly and the
+    persister stores it directly. ``metrics`` allows ``None`` values because
+    ``evidence_quality`` can be absent when the diagnosis path bailed before
+    a context was available (the runner emits ``None`` rather than 0 so the
+    metric stays out of stability aggregations).
+
+    ``incident_fingerprint/title/severity`` are denormalised from the incident
+    at write time so results remain self-contained after the runner truncates
+    the incidents table between cases. ``raw_response`` carries the unparsed
+    Anthropic envelope when captured; left ``None`` when the runner doesn't
+    forward it (today the cassette path doesn't).
     """
 
     run_id: UUID
     case_id: str
     shot_index: int
     case_status: Literal["ok", "timeout", "ingest_failed", "schema_failed", "rate_limited"]
-    metrics: dict[str, float]
+    metrics: dict[str, float | None]
     raw_response: dict[str, Any] | None
     diagnosis: dict[str, Any] | None
     incident_id: UUID | None
@@ -1425,48 +1433,6 @@ def _eval_run_record_from_model(row: EvalRunModel) -> EvalRunRecord:
     )
 
 
-async def fetch_latest_diagnosis_for_eval(
-    session_factory: async_sessionmaker[AsyncSession],
-    incident_id: UUID,
-) -> PersistedDiagnosis | None:
-    """Eval-runner polling helper — most-recent persisted diagnosis for an
-    incident, or None if no diagnosis row has landed yet.
-
-    Redundant after PR 1 added ``DiagnosisRepository.get_by_incident_id``;
-    kept here only because the PR 3c CLI imports it via the
-    ``_EvalDiagnosisLookup`` adapter. Drop both during the post-merge
-    reconciliation PR.
-    """
-    from sqlalchemy import desc
-
-    from sentinel.schemas.diagnosis import EvidenceRef, SuggestedAction
-
-    async with session_factory() as session:
-        row = (
-            await session.execute(
-                select(DiagnosisModel)
-                .where(DiagnosisModel.incident_id == incident_id)
-                .order_by(desc(DiagnosisModel.created_at))
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            return None
-        return PersistedDiagnosis(
-            hypothesis=row.hypothesis,
-            confidence=row.confidence,
-            reasoning=row.reasoning,
-            evidence=[EvidenceRef.model_validate(e) for e in row.evidence],
-            suggested_actions=[SuggestedAction.model_validate(a) for a in row.suggested_actions],
-            likely_category=cast(Any, row.likely_category),
-            hallucinated_evidence=row.hallucinated_evidence,
-            model=row.model,
-            prompt_version=row.prompt_version,
-            latency_ms=row.latency_ms,
-            token_usage=row.token_usage,
-        )
-
-
 async def truncate_eval_runtime_state(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1512,6 +1478,5 @@ __all__ = [
     "RunbookRepository",
     "SimilarIncidentRow",
     "StoredEnrichmentContext",
-    "fetch_latest_diagnosis_for_eval",
     "truncate_eval_runtime_state",
 ]

@@ -419,3 +419,62 @@ def test_run_result_aggregation_empty_cases() -> None:
     assert agg.hypothesis_cosine == 0.0
     assert agg.action_coverage == 0.0
     assert agg.evidence_quality is None
+
+
+# --- T12 / T13: regression tests for the eval harness wiring ---------------- #
+
+
+@pytest.mark.asyncio
+async def test_per_shot_external_id_is_distinct_across_shots() -> None:
+    # Regression (2026-05-20): a previous runner reused the same external_id
+    # for every shot of a case, which collided with the incident-recurred /
+    # fingerprint-dedup logic and made shots 2+ overwrite shot 0's incident
+    # row. Result: per-shot diagnoses bled into each other. Fix: encode the
+    # shot index into the webhook payload's external id so each shot is a
+    # distinct incident from the system's perspective.
+    import json
+
+    case = _build_case()
+    bundle = _build_deps(
+        diagnosis=_build_persisted_diagnosis(),
+        client_body={"incident_id": str(uuid4())},
+    )
+
+    await run_corpus(cases=[case], shots_per_case=3, runner_deps=bundle.deps)
+
+    # Every shot posts one webhook → 3 requests for shots_per_case=3.
+    assert len(bundle.client.requests) == 3
+    external_ids: list[str] = []
+    for _url, body, _hdrs in bundle.client.requests:
+        payload = json.loads(body)
+        # The corpus uses `id` as the external_id field on the webhook body.
+        external_ids.append(payload["id"])
+
+    assert len(set(external_ids)) == 3, f"shots must use distinct external_ids; got {external_ids}"
+    # And the shot index must be embedded in the id so the source is
+    # debuggable from a webhook log alone.
+    for i, ext_id in enumerate(external_ids):
+        assert (
+            f"shot-{i}" in ext_id
+        ), f"shot {i} external_id {ext_id!r} should encode its shot index"
+
+
+@pytest.mark.asyncio
+async def test_truncate_runs_once_per_case_not_once_per_shot() -> None:
+    # Regression (2026-05-20): an earlier runner truncated the incidents/
+    # diagnoses tables between every shot, which raced with the async
+    # enricher/diagnoser consumers still processing the previous shot's
+    # events and produced FK violations
+    # (`diagnoses_incident_id_fkey`). The fix moved truncate to per-case
+    # cadence because each shot now uses a distinct external_id (see
+    # test above) so cross-shot state contamination within a case isn't a
+    # concern. This test pins the cadence: N cases x M shots == N truncates.
+    cases = [_build_case(case_id=f"c-{i}") for i in range(4)]
+    bundle = _build_deps(diagnosis=_build_persisted_diagnosis())
+
+    await run_corpus(cases=cases, shots_per_case=2, runner_deps=bundle.deps)
+
+    assert len(bundle.truncate_calls) == len(cases), (
+        f"expected one truncate per case (cadence regression); "
+        f"got {len(bundle.truncate_calls)} truncate calls for {len(cases)} cases"
+    )
