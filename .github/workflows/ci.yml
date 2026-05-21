@@ -112,6 +112,10 @@ jobs:
       SENTINEL_KAFKA_BROKERS: localhost:29092
       SENTINEL_ANTHROPIC_API_KEY: sk-placeholder-cassette-replay
       SENTINEL_GENERIC_WEBHOOK_SECRET: ci-eval-secret
+      # fastembed default cache (/var/cache/fastembed) needs root on the CI
+      # runner. Point it at the workspace so the eval scorer can download/
+      # cache the embedding model under a writable path.
+      SENTINEL_EMBEDDING_MODEL_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
     steps:
       - uses: actions/checkout@v4
 
