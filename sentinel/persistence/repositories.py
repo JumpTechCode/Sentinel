@@ -155,6 +155,7 @@ class EvalRunRecord:
     regression_passed: bool | None
     regression_detail: dict[str, Any] | None
     extra: dict[str, Any]
+    completed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1430,6 +1431,7 @@ def _eval_run_record_from_model(row: EvalRunModel) -> EvalRunRecord:
         regression_passed=row.regression_passed,
         regression_detail=dict(row.regression_detail) if row.regression_detail else None,
         extra=dict(row.extra) if row.extra else {},
+        completed_at=row.completed_at,
     )
 
 

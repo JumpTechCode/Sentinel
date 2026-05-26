@@ -23,7 +23,10 @@ asserts on the ``SystemExit.code``.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sentinel.evals import cli
@@ -186,6 +189,13 @@ def test_record_requires_api_key(
     # The record-specific message includes "ANTHROPIC_API_KEY" and "record mode".
     assert "ANTHROPIC_API_KEY" in captured.err
     assert "record mode" in captured.err.lower()
+
+
+def test_parser_record_defaults_no_persist_true() -> None:
+    """record subcommand must default no_persist=True (record never opens eval_runs rows)."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["record", "--corpus", "corpus"])
+    assert args.no_persist is True
 
 
 # --- compare-to-baseline (paired-bootstrap regression gate) ----------------- #
@@ -530,3 +540,304 @@ def test_readme_errors_when_markers_missing(
                 str(results_dir),
             ]
         )
+
+
+# --- Parser flags (--allow-dirty, --no-persist) ------------------------------ #
+
+
+def test_parser_accepts_allow_dirty() -> None:
+    """Parser accepts --allow-dirty flag and sets it to True."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["--allow-dirty", "run"])
+    assert args.allow_dirty is True
+
+
+def test_parser_allow_dirty_default_false() -> None:
+    """--allow-dirty defaults to False when not provided."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["run"])
+    assert args.allow_dirty is False
+
+
+def test_parser_accepts_no_persist_on_run() -> None:
+    """Parser accepts --no-persist flag on run subcommand."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["run", "--no-persist"])
+    assert args.no_persist is True
+
+
+def test_parser_no_persist_default_false() -> None:
+    """--no-persist defaults to False when not provided."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["run"])
+    assert args.no_persist is False
+
+
+def test_parser_accepts_no_persist_on_baseline() -> None:
+    """Parser accepts --no-persist flag on baseline subcommand."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["baseline", "--no-persist"])
+    assert args.no_persist is True
+
+
+def test_parser_allow_dirty_works_with_baseline() -> None:
+    """--allow-dirty flag works with baseline subcommand."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["--allow-dirty", "baseline"])
+    assert args.allow_dirty is True
+
+
+# --- _discover_run_metadata tests ------------------------------------------- #
+
+
+def _fake_settings() -> Any:
+    """Minimal duck-typed Settings stand-in for _discover_run_metadata."""
+    return SimpleNamespace(
+        anthropic_model="claude-sonnet-4-5",
+        diagnosis_prompt_version="v1",
+        embedding_model_name="BAAI/bge-small-en-v1.5",
+    )
+
+
+def _patch_git(monkeypatch: pytest.MonkeyPatch, *, sha: str, dirty: bool) -> None:
+    """Patch subprocess.run so _discover_run_metadata sees deterministic git state."""
+    import subprocess
+
+    def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=sha + "\n", stderr="")
+        if cmd[:3] == ["git", "status", "--porcelain"]:
+            stdout = b" M sentinel/evals/cli.py\n" if dirty else b""
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=b"")
+        raise AssertionError(f"unexpected subprocess.run call: {cmd!r}")
+
+    # Patch the name as used inside sentinel.evals.cli so a future
+    # `from subprocess import run` refactor won't silently break the mock.
+    monkeypatch.setattr("sentinel.evals.cli.subprocess.run", fake_run)
+
+
+def _write_corpus_fixture(tmp_path: Path) -> tuple[Path, list[Any]]:
+    """Write a 1-case corpus YAML to tmp_path and return (corpus_dir, cases)."""
+    from sentinel.evals.corpus_loader import load_corpus_dir
+
+    yaml_text = (
+        "id: cf-2019-cpu\n"
+        "corpus_version: 1\n"
+        "source_url: https://example.com/postmortem\n"
+        "sources_consulted:\n"
+        "  - https://example.com/postmortem\n"
+        "alert:\n"
+        "  source: generic\n"
+        "  service: api\n"
+        "  severity: SEV1\n"
+        "  title: 'CPU spike'\n"
+        "  timestamp: '2019-07-02T00:00:00Z'\n"
+        "  raw_payload: {}\n"
+        "context_seed:\n"
+        "  deploys: []\n"
+        "  related_alerts: []\n"
+        "  similar_incidents: []\n"
+        "  runbooks: []\n"
+        "  recent_logs: []\n"
+        "  active_alerts: []\n"
+        "ground_truth:\n"
+        "  category: deploy\n"
+        "  acceptable_categories: [deploy]\n"
+        "  root_cause: 'bad deploy'\n"
+        "  correct_actions: ['rollback']\n"
+    )
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "cf-2019-cpu.yaml").write_text(yaml_text)
+    return corpus_dir, load_corpus_dir(corpus_dir)
+
+
+def test_discover_metadata_trigger_local(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_WORKFLOW", raising=False)
+    _patch_git(monkeypatch, sha="abc123" * 6 + "abcd", dirty=False)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=False, live=False)
+    kw = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw["trigger"] == "local"
+    assert kw["git_sha"] == "abc123" * 6 + "abcd"
+    assert kw["status"] == "running"
+
+
+def test_discover_metadata_trigger_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "nightly-evals")
+    _patch_git(monkeypatch, sha="0" * 40, dirty=False)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="baseline", allow_dirty=False, live=False)
+    kw = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw["trigger"] == "baseline"  # baseline subcommand wins over CI signals
+
+
+def test_discover_metadata_trigger_ci_nightly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "nightly-evals")
+    _patch_git(monkeypatch, sha="0" * 40, dirty=False)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=False, live=True)
+    kw = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw["trigger"] == "ci-nightly"
+
+
+def test_discover_metadata_trigger_ci_smoke(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "ci")
+    _patch_git(monkeypatch, sha="0" * 40, dirty=False)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=False, live=False)
+    kw = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw["trigger"] == "ci-smoke"  # legacy name preserved
+
+
+def test_discover_metadata_trigger_manual_workflow_dispatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "manual-replay")
+    _patch_git(monkeypatch, sha="0" * 40, dirty=False)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=False, live=False)
+    kw = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw["trigger"] == "manual"
+
+
+def test_discover_metadata_dirty_tree_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.delenv("CI", raising=False)
+    _patch_git(monkeypatch, sha="0" * 40, dirty=True)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=False, live=False)
+    with pytest.raises(SystemExit) as exc:
+        _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "dirty" in err.lower()
+
+
+def test_discover_metadata_dirty_tree_allowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.delenv("CI", raising=False)
+    _patch_git(monkeypatch, sha="0" * 40, dirty=True)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=True, live=False)
+    kw = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw["extra"]["allow_dirty"] is True
+
+
+def test_discover_metadata_corpus_version_deterministic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.delenv("CI", raising=False)
+    _patch_git(monkeypatch, sha="0" * 40, dirty=False)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=False, live=False)
+    kw1 = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+    kw2 = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw1["corpus_version"] == kw2["corpus_version"]
+    assert len(kw1["corpus_version"]) == 64  # sha256 hex
+
+
+def test_discover_metadata_corpus_version_includes_yml_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """_hash_corpus_files must glob both *.yaml and *.yml, mirroring corpus_loader."""
+    from sentinel.evals.cli import _hash_corpus_files
+
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+
+    # Write one .yaml and one .yml file — both must be included in the hash.
+    (corpus_dir / "case-a.yaml").write_bytes(b"yaml content a")
+    (corpus_dir / "case-b.yml").write_bytes(b"yml content b")
+
+    hash_both = _hash_corpus_files(corpus_dir)
+
+    # Hash of only the .yaml file should differ (proves .yml is being hashed).
+    hash_yaml_only = hashlib.sha256(b"yaml content a").hexdigest()
+    assert (
+        hash_both != hash_yaml_only
+    ), "_hash_corpus_files ignored *.yml files — corpus_version would be wrong"
+    assert len(hash_both) == 64  # sha256 hex
+
+
+def test_discover_metadata_fetcher_fixture_hash_deterministic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.delenv("CI", raising=False)
+    _patch_git(monkeypatch, sha="0" * 40, dirty=False)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=False, live=False)
+    kw1 = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+    kw2 = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw1["fetcher_fixture_hash"] == kw2["fetcher_fixture_hash"]
+    assert len(kw1["fetcher_fixture_hash"]) == 64
+
+
+def test_discover_metadata_includes_settings_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from sentinel.evals.cli import _discover_run_metadata
+
+    monkeypatch.delenv("CI", raising=False)
+    _patch_git(monkeypatch, sha="0" * 40, dirty=False)
+    corpus_dir, cases = _write_corpus_fixture(tmp_path)
+
+    args = SimpleNamespace(subcommand="run", allow_dirty=False, live=False)
+    kw = _discover_run_metadata(args, _fake_settings(), corpus_dir, cases)  # type: ignore[arg-type]
+
+    assert kw["model"] == "claude-sonnet-4-5"
+    assert kw["prompt_version"] == "v1"
+    assert kw["embedding_model_id"] == "BAAI/bge-small-en-v1.5"
+    assert kw["corpus_size"] == 1
+    assert "shots_per_case" in kw
+    assert kw["shots_per_case"] == 1
