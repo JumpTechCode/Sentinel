@@ -34,14 +34,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 from pydantic import SecretStr
@@ -50,13 +53,22 @@ from sentinel.config.settings import Settings, load_settings
 from sentinel.evals.cassette import CassetteMiss
 from sentinel.evals.corpus_loader import load_corpus_dir
 from sentinel.evals.report import write_report
-from sentinel.evals.runner import EvalCaseResultRecord, RunnerDeps, run_corpus
+from sentinel.evals.runner import (
+    EvalCaseResultRecord,
+    EvalShotPersister,
+    RunnerDeps,
+    RunResult,
+    run_corpus,
+)
+from sentinel.evals.schema import CorpusCase
 from sentinel.memory.embeddings import FastEmbedProvider
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from sentinel.evals.schema import RegressionVerdict
+    from sentinel.persistence.repositories import PostgresEvalRunRepository
+
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +96,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m sentinel.evals",
         description="Sentinel eval harness CLI.",
+    )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help=(
+            "permit eval runs against a dirty working tree (default: refuse). "
+            "applies only to subcommands that open an eval_runs row (run, baseline)."
+        ),
     )
     sub = parser.add_subparsers(dest="subcommand")
 
@@ -135,6 +155,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("evals/results"),
         help="where to write the JSON + MD report",
     )
+    run_p.add_argument(
+        "--no-persist",
+        action="store_true",
+        help=(
+            "skip PostgresEvalRunRepository wiring; use the in-memory stub persister "
+            "(no eval_runs / eval_case_results rows). default: persist to DB."
+        ),
+    )
     run_p.set_defaults(func=_cmd_run)
 
     # record ----------------------------------------------------------------
@@ -174,7 +202,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("evals/results"),
         help="where to write the JSON + MD report (record runs also emit a report)",
     )
-    rec_p.set_defaults(func=_cmd_record)
+    rec_p.set_defaults(func=_cmd_record, no_persist=True)
 
     # baseline --------------------------------------------------------------
     # Runs the corpus through the same pipeline as `run`, then writes a
@@ -226,6 +254,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--live",
         action="store_true",
         help="opt-in to live API calls (default: cassette replay only)",
+    )
+    base_p.add_argument(
+        "--no-persist",
+        action="store_true",
+        help=(
+            "skip PostgresEvalRunRepository wiring; use the in-memory stub persister "
+            "(no eval_runs / eval_case_results rows). default: persist to DB."
+        ),
     )
     base_p.set_defaults(func=_cmd_baseline)
 
@@ -460,6 +496,168 @@ def _check_common_eval_guards(settings: Settings) -> int | None:
     return None
 
 
+def _discover_run_metadata(
+    args: argparse.Namespace,
+    settings: Settings,
+    corpus_dir: Path,
+    cases: list[CorpusCase],
+) -> dict[str, Any]:
+    """Collect every kwarg PostgresEvalRunRepository.start_run requires.
+
+    Reads CLI args, env, git state, and the loaded corpus. Raises SystemExit(1)
+    on a dirty working tree unless --allow-dirty is set; this is intentional —
+    eval runs against uncommitted code are a frequent source of "why don't the
+    numbers reproduce" confusion. See docs/adr/0008-eval-run-trigger-inference.md.
+    """
+    # Check dirty tree BEFORE fetching SHA — fast-fail on the cheap condition first.
+    if _git_tree_is_dirty() and not args.allow_dirty:
+        print(
+            "error: working tree is dirty; commit or pass --allow-dirty",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    git_sha = _git_sha(strict=True)
+
+    trigger = _infer_trigger(args)
+    corpus_version = _hash_corpus_files(corpus_dir)
+    fetcher_fixture_hash = _hash_fetcher_fixtures(cases)
+    cassette_mode = "live" if getattr(args, "live", False) else "replay"
+    shots = getattr(args, "shots", 1)
+
+    return {
+        "status": "running",
+        "trigger": trigger,
+        "git_sha": git_sha,
+        "model": settings.anthropic_model,
+        "prompt_version": settings.diagnosis_prompt_version,
+        "embedding_model_id": settings.embedding_model_name,
+        "corpus_version": corpus_version,
+        "corpus_size": len(cases),
+        "shots_per_case": shots,
+        "fetcher_fixture_hash": fetcher_fixture_hash,
+        "extra": {
+            "cassette_mode": cassette_mode,
+            "allow_dirty": args.allow_dirty,
+            "subcommand": args.subcommand,
+        },
+    }
+
+
+def _git_tree_is_dirty() -> bool:
+    """Return True if the working tree has uncommitted changes.
+
+    Uses check=False / returncode inspection to match the failure-handling
+    pattern of _git_sha. On failure (git not on PATH, not a repo, etc.),
+    raises SystemExit(1) with a friendly message rather than leaking a traceback.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "status", "--porcelain"],  # noqa: S607
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"error: git status --porcelain failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    if result.returncode != 0:
+        reason = result.stderr.decode(errors="replace").strip()
+        print(f"error: git status --porcelain failed: {reason}", file=sys.stderr)
+        raise SystemExit(1)
+    return bool(result.stdout.strip())
+
+
+def _infer_trigger(
+    args: argparse.Namespace,
+) -> Literal["local", "ci-smoke", "ci-nightly", "baseline", "manual"]:
+    if args.subcommand == "baseline":
+        return "baseline"
+    ci = os.environ.get("CI", "").lower() in ("true", "1", "yes")
+    if not ci:
+        return "local"
+    workflow = os.environ.get("GITHUB_WORKFLOW", "")
+    if workflow == "nightly-evals":
+        return "ci-nightly"
+    if workflow == "ci":
+        # Legacy persisted-value name. The PR-gate job is now named `evals-gate`
+        # (job name, not workflow name — the workflow remains `ci`), and runs the
+        # full corpus (PR 4a), but the persisted trigger value stays as `ci-smoke`
+        # to avoid a Postgres CHECK migration. See ADR 0008.
+        return "ci-smoke"
+    return "manual"
+
+
+def _hash_corpus_files(corpus_dir: Path) -> str:
+    """sha256 of the concatenation of sorted-by-name corpus YAML bytes.
+
+    Mirrors corpus_loader.load_corpus_dir's glob: both *.yaml and *.yml are
+    included so the hash is stable regardless of which extension curators use.
+    """
+    h = hashlib.sha256()
+    paths = sorted(set(corpus_dir.glob("*.yaml")) | set(corpus_dir.glob("*.yml")))
+    for path in paths:
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def _hash_fetcher_fixtures(cases: list[CorpusCase]) -> str:
+    """sha256 of each case's context_seed serialized as canonical JSON,
+    concatenated in case-id order. Stable across runs because pydantic's
+    model_dump(mode='json') is deterministic given the same input."""
+    h = hashlib.sha256()
+    for case in sorted(cases, key=lambda c: c.id):
+        seed_json = json.dumps(case.context_seed.model_dump(mode="json"), sort_keys=True).encode()
+        h.update(seed_json)
+    return h.hexdigest()
+
+
+async def _finalize_run(
+    repo: PostgresEvalRunRepository,
+    run_id: uuid.UUID,
+    result: RunResult | None,
+    error: BaseException | None,
+) -> None:
+    """Always-finalize wrapper for the run row. Called from ``finally`` so a
+    cassette miss, KeyboardInterrupt, or DB error during the run still leaves
+    a terminal-status row instead of a perpetually-``running`` orphan.
+    """
+    if error is not None or result is None:
+        status: Literal["ok", "failed", "partial"] = "failed"
+        metrics: dict[str, float] = {}
+        metrics_stability: dict[str, float] = {}
+        regression_detail: dict[str, Any] | None = {"error": repr(error) if error else "no result"}
+    else:
+        status = "ok"
+        agg = result.aggregate_metrics
+        metrics = {
+            "category_match": agg.category_match,
+            "hypothesis_cosine": agg.hypothesis_cosine,
+            "action_coverage": agg.action_coverage,
+        }
+        if agg.evidence_quality is not None:
+            metrics["evidence_quality"] = agg.evidence_quality
+        # Run-level stability skipped here; PR 6 adds meaningful stability
+        # (--shots > 1).
+        metrics_stability = {}
+        regression_detail = None
+
+    try:
+        await repo.finalize_run(
+            run_id,
+            status=status,
+            metrics=metrics,
+            metrics_stability=metrics_stability,
+            regression_baseline_sha=None,
+            regression_passed=None,
+            regression_detail=regression_detail,
+        )
+    except Exception:
+        # finalize_run failure must NOT mask the original error. Log + swallow.
+        # The run row may be left at status=running; an operator can fix via SQL
+        # if it matters — the original error is far more diagnostic.
+        log.exception("finalize_run failed for run_id=%s", run_id)
+
+
 async def _run_async(
     args: argparse.Namespace,
     settings: Settings,
@@ -544,7 +742,10 @@ async def _run_async(
             # Protocol structurally.
             from sqlalchemy.ext.asyncio import async_sessionmaker
 
-            from sentinel.persistence.repositories import PostgresDiagnosisRepository
+            from sentinel.persistence.repositories import (
+                PostgresDiagnosisRepository,
+                PostgresEvalRunRepository,
+            )
 
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
             diagnosis_repo = PostgresDiagnosisRepository(session_factory)
@@ -570,22 +771,30 @@ async def _run_async(
                 )
                 return 1
 
-            # Run id is generated locally; the JSON+MD reports under
-            # --output-dir are the canonical record of the run today. Switching
-            # to PostgresEvalRunRepository requires building out the
-            # ``start_run`` / ``finalize_run`` lifecycle (DB-managed run_id,
-            # corpus_version, fetcher_fixture_hash, git_sha, regression
-            # comparison) — that's a product change (queryable run history),
-            # not a cleanup, and belongs in its own PR.
-            run_id = uuid.uuid4()
-            shot_persister = _StubShotPersister()
-
-            print(f"eval run starting: run_id={run_id} cases={len(cases)} shots={args.shots}")
+            run_repo: EvalShotPersister
+            run_id: uuid.UUID
+            real_run_repo: PostgresEvalRunRepository | None = None
+            if args.no_persist:
+                run_id = uuid.uuid4()
+                run_repo = _StubShotPersister()
+                print(
+                    f"eval run starting: run_id={run_id} cases={len(cases)} "
+                    f"shots={args.shots} [--no-persist: in-memory only]"
+                )
+            else:
+                real_run_repo = PostgresEvalRunRepository(session_factory)
+                start_kwargs = _discover_run_metadata(args, settings, corpus_dir, cases)
+                run_id = await real_run_repo.start_run(**start_kwargs)
+                run_repo = real_run_repo
+                print(
+                    f"eval run starting: run_id={run_id} cases={len(cases)} "
+                    f"shots={args.shots} trigger={start_kwargs['trigger']}"
+                )
 
             deps = RunnerDeps(
                 client=client,
                 diagnosis_repo=diagnosis_repo,
-                eval_run_repo=shot_persister,
+                eval_run_repo=run_repo,
                 embed=embed,
                 cassette_transport=cassette_transport,
                 run_id=run_id,
@@ -595,20 +804,25 @@ async def _run_async(
                 webhook_secret=_ensure_secret(webhook_secret),
             )
 
+            result: RunResult | None = None
+            run_error: BaseException | None = None
             try:
                 result = await run_corpus(
                     cases=cases,
                     shots_per_case=args.shots,
                     runner_deps=deps,
                 )
+            except BaseException as exc:  # finalize even on KeyboardInterrupt
+                run_error = exc
+                raise
             finally:
+                if real_run_repo is not None:
+                    await _finalize_run(real_run_repo, run_id, result, run_error)
                 await engine.dispose()
 
     # Only reached if run_corpus succeeded; an exception inside the lifespan/
     # client/engine contexts above propagates out of _run_async to the caller,
-    # which catches CassetteMiss/RuntimeError. Guarding with `result is not None`
-    # would not help because `result` would be unbound — let the caller see the
-    # original exception.
+    # which catches CassetteMiss/RuntimeError.
     args.output_dir.mkdir(parents=True, exist_ok=True)
     json_path, md_path = write_report(run_result=result, output_dir=args.output_dir)
     print(f"eval run complete: run_id={run_id}")
@@ -645,7 +859,6 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
         return 1
     run_json_path = json_files[0]
 
-    import json
     from datetime import UTC, datetime
 
     try:
@@ -680,8 +893,6 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     """Compare a run's per-case metrics against a baseline file using the
     paired-bootstrap regression gate. Exits non-zero on any regression.
     """
-    import json
-
     baseline_path: Path = args.baseline or (args.baseline_dir / f"{args.name}.json")
     if not baseline_path.exists():
         print(
@@ -896,11 +1107,17 @@ def _render_regression_markdown(
     return "\n".join(lines)
 
 
-def _git_sha() -> str:
-    """Resolve the current git SHA; returns ``"unknown"`` when we're not in a
-    git checkout (e.g. running from a tarball)."""
-    import subprocess
+def _git_sha(*, strict: bool = False) -> str:
+    """Resolve the current git SHA.
 
+    When ``strict=False`` (default): returns ``"unknown"`` if we're not in a
+    git checkout or git is not on PATH (e.g. running from a tarball). This is
+    the safe no-op behaviour for callers where a missing SHA is acceptable.
+
+    When ``strict=True``: propagates failures as ``SystemExit(1)`` with a
+    friendly stderr message. Use this for eval runs where a missing SHA would
+    silently produce an un-reproducible result record.
+    """
     try:
         # argv is fixed (no shell interpolation), and `git` is intentionally
         # resolved via PATH so this works in any dev environment and CI runner
@@ -913,9 +1130,16 @@ def _git_sha() -> str:
             timeout=2,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        if strict:
+            print(f"error: git rev-parse HEAD failed: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
         return "unknown"
     if result.returncode != 0:
+        if strict:
+            reason = result.stderr.strip() or f"exit code {result.returncode}"
+            print(f"error: git rev-parse HEAD failed: {reason}", file=sys.stderr)
+            raise SystemExit(1)
         return "unknown"
     return result.stdout.strip() or "unknown"
 
@@ -961,17 +1185,12 @@ def _cmd_readme(args: argparse.Namespace) -> int:
 
 
 class _StubShotPersister:
-    """In-memory persister — keeps the JSON+MD report files as the canonical
-    artifact of an eval run, since the eval CLI doesn't yet construct the
-    surrounding ``start_run``/``finalize_run`` lifecycle that
-    ``PostgresEvalRunRepository.persist_shot`` requires (the row's FK to
-    ``eval_runs.id`` would fail without a matching start_run row).
+    """In-memory persister used by ``--no-persist`` to skip eval_runs/eval_case_results writes.
 
-    Holds the unified ``EvalCaseResultRecord`` defined in
-    ``sentinel/persistence/repositories.py`` — the duplicate-shape bridge
-    that PR 3b/3c briefly shipped has been removed. Wiring the real
-    repository requires extending the CLI with corpus-version and
-    fetcher-fixture-hash discovery; tracked separately.
+    The real ``PostgresEvalRunRepository`` is wired in ``_run_async`` when
+    ``--no-persist`` is not set. The stub remains useful for offline dev iteration
+    against cassettes when the Postgres engine isn't running, and for the
+    ``record`` subcommand which has no need to persist run history.
     """
 
     def __init__(self) -> None:
