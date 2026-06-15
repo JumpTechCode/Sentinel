@@ -35,6 +35,11 @@ dependencies = [
   "pyyaml>=6.0.2,<7",
   "pgvector>=0.3.0,<0.4.0",
   "fastembed>=0.4,<0.5",
+  # Transitive of fastembed/huggingface-hub. Pin below 4.68: tqdm 4.68.x has a
+  # thread_map `_lock` regression that crashes fastembed's model download
+  # (AttributeError: type object 'tqdm' has no attribute '_lock'), breaking the
+  # eval gate on a cold model cache. 4.67.x is the last working line.
+  "tqdm>=4.66,<4.68",
 ]
 
 [project.optional-dependencies]
