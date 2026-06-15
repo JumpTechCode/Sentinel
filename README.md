@@ -7,42 +7,51 @@ Public engineering portfolio. Held to a production bar — every external call h
 ## Eval results
 
 <!-- evals:start -->
-_From eval run `4388e5a6-e2ef-437f-8683-8a096f602976` (auto-generated; do not edit between markers)._
+_From eval run `e7128643-f3f2-4101-9513-ad381fbd4b99` (auto-generated; do not edit between markers)._
 
 ## Aggregate Metrics
 
 | Metric | Value |
 |---|---|
 | category_match | 0.90 |
-| hypothesis_cosine | 0.81 |
-| action_coverage | 0.76 |
+| hypothesis_cosine | 0.82 |
+| action_coverage | 0.75 |
 | evidence_quality | 1.00 |
 
 ## Per-case
 
-| Case | category | hypothesis | actions | evidence |
-|---|---|---|---|---|
-| atlassian-2022-04-04-deletion | 1.00 | 0.87 | 0.74 | 1.00 |
-| aws-2021-12-07-useast1 | 1.00 | 0.82 | 0.76 | 1.00 |
-| cloudflare-2019-07-02-regex | 1.00 | 0.80 | 0.76 | 1.00 |
-| cloudflare-2022-06-21-bgp | 1.00 | 0.90 | 0.77 | 1.00 |
-| fastly-2021-06-08-config | 1.00 | 0.75 | 0.85 | 1.00 |
-| github-2018-10-21-network | 0.00 | 0.77 | 0.75 | 1.00 |
-| gitlab-2017-01-31-db-deletion | 1.00 | 0.79 | 0.71 | 1.00 |
-| roblox-2021-10-28-consul | 1.00 | 0.81 | 0.75 | 1.00 |
-| slack-2021-01-04-dns | 1.00 | 0.79 | 0.70 | 1.00 |
-| stripe-2019-07-10-db-failover | 1.00 | 0.85 | 0.77 | 1.00 |
+| Case | category | hypothesis | actions | evidence | stability |
+|---|---|---|---|---|---|
+| atlassian-2022-04-04-deletion | 1.00 | 0.86 | 0.72 | 1.00 | 0.02 |
+| aws-2021-12-07-useast1 | 1.00 | 0.86 | 0.77 | 1.00 | 0.00 |
+| cloudflare-2019-07-02-regex | 1.00 | 0.81 | 0.78 | 1.00 | 0.02 |
+| cloudflare-2022-06-21-bgp | 1.00 | 0.87 | 0.76 | 1.00 | 0.01 |
+| fastly-2021-06-08-config | 1.00 | 0.76 | 0.82 | 1.00 | 0.01 |
+| github-2018-10-21-network | 0.33 | 0.77 | 0.74 | 1.00 | 0.15 |
+| gitlab-2017-01-31-db-deletion | 1.00 | 0.79 | 0.72 | 1.00 | 0.00 |
+| roblox-2021-10-28-consul | 0.67 | 0.80 | 0.75 | 1.00 | 0.16 |
+| slack-2021-01-04-dns | 1.00 | 0.80 | 0.70 | 1.00 | 0.01 |
+| stripe-2019-07-10-db-failover | 1.00 | 0.84 | 0.77 | 1.00 | 0.00 |
 
 ## Headline
 
-- pass_rate_strict: 90.0%
-- shots_per_case: 1 (stability not reported)
+- pass_rate_strict: 80.0%
+- mean_stability: 0.039
 <!-- evals:end -->
 
-> Single shot per case — multi-shot stability is intentionally disabled until
-> the `uq_diagnoses_incident_prompt_model` collapse is resolved (see
-> [ADR 0007](docs/adr/0007-evidence-id-format.md) for the (kind, id) match
-> contract this run relies on).
+> Three shots per case. Shot 0 runs the full webhook → diagnose pipeline and is
+> the persisted, scored shot; shots 1+ re-run diagnosis in-memory against the
+> same context to measure run-to-run LLM stability (the `stability` column is
+> the mean per-case stddev across shots — lower is steadier). See
+> [ADR 0009](docs/adr/0009-stability-at-llm-call-level.md) for why stability is
+> measured at the LLM-call level, decoupled from the production idempotency
+> contract, and [ADR 0007](docs/adr/0007-evidence-id-format.md) for the
+> (kind, id) evidence-match contract these numbers rely on.
+>
+> `pass_rate_strict` counts a case only when *every* shot clears all four
+> thresholds (category exact, hypothesis ≥ 0.7, actions ≥ 0.6, evidence ≥ 0.8),
+> so it now measures consistency rather than a single lucky shot — two cases
+> where the model's category wobbles across shots are why it reads 80% here.
 
 ## Why it's built this way
 
@@ -104,18 +113,18 @@ sentinel/
 ├── integrations/   sentry · pagerduty · datadog · generic — adapters normalize to NormalizedAlert
 ├── enrichment/     parallel fetchers + circuit breaker, orchestrator, Kafka consumer
 ├── diagnosis/      LLM client, versioned prompt bundle, validation gate, persistence, consumer
-├── memory/         pgvector incident store + embedding pipeline                       (stub — H)
+├── memory/         pgvector incident store + embedding pipeline, embed-on-resolve feedback
 ├── persistence/    SQLAlchemy models, Alembic migrations, repositories
 ├── observability/  Prometheus metrics, OTel tracing, structlog, LLM audit log + cost meter
 ├── schemas/        Pydantic v2 contracts shared across modules (NormalizedAlert, Diagnosis, …)
 ├── api/            FastAPI app (routes/health, routes/webhooks)
-├── evals/          eval harness against public postmortems                            (stub — K)
+├── evals/          eval harness: postmortem corpus, scoring, multi-shot stability, CI gate
 └── config/         pydantic-settings, per-env defaults, secret loading
 ```
 
 ## Project status
 
-Built phase by phase. Each phase's CI gate must be green before the next starts.
+Built work area by work area, each behind a green CI gate. The eval harness (K) was prioritized ahead of the remaining API surface (I) and UI (L).
 
 | Phase | Work area | Status |
 |------:|-----------|--------|
@@ -124,9 +133,9 @@ Built phase by phase. Each phase's CI gate must be green before the next starts.
 | 3 | Webhook ingestion + integration adapters (D, E) — `/webhooks/{source}`, HMAC, fingerprinting, dedup, transactional outbox | ✅ Landed |
 | 4 | Enrichment pipeline (F) — parallel fetchers, circuit breakers, `incident.enriched` event | ✅ Landed |
 | 5 | Diagnosis agent (G) — versioned prompt, Anthropic call, schema + evidence gate, idempotent persistence | ✅ Landed |
-| 6 | Memory / feedback loop (H) — embedding on resolve, similar-incident retrieval feedback | ⏳ Next |
+| 6 | Memory / feedback loop (H) — embedding on resolve, similar-incident retrieval feedback | ✅ Landed |
 | 7 | API surface (I) — REST + SSE/WS, `/readyz` dependency checks, OpenAPI publish | ⏳ Planned |
-| 8 | Eval harness (K) — postmortem corpus, scoring, CI smoke + nightly full | ⏳ Planned |
+| 8 | Eval harness (K) — postmortem corpus, scoring, multi-shot stability, CI gate + nightly full | ✅ Landed |
 | 9 | UI (L) — Next.js incident view | ⏳ Planned |
 | 10 | Load + chaos (M) — Locust, Toxiproxy | ⏳ Planned |
 
@@ -189,7 +198,7 @@ pytest tests/unit/diagnosis/test_validation.py::test_hallucinated_evidence_caps_
 
 ### CI
 
-Every PR runs: `lint → typecheck → unit → integration → evals-smoke`. Nightly runs the full eval corpus. README numbers (once eval phase lands) come from `evals/results/<latest>.md` — never hand-edited.
+Every PR runs: `lint → typecheck → unit → integration → evals-gate` (full corpus, cassette replay + regression gate). A nightly workflow runs the full corpus against the live Anthropic API and opens a drift issue on regression. README numbers come from `evals/results/<latest>.md` — never hand-edited.
 
 ## Configuration
 

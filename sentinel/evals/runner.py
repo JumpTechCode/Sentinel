@@ -56,6 +56,8 @@ from uuid import UUID
 import httpx
 from pydantic import SecretStr
 
+from sentinel.diagnosis.agent import diagnose
+from sentinel.diagnosis.deps import DiagnosisDeps
 from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.enrichment.protocols import EmbeddingProvider
 from sentinel.evals.cassette import CassetteContext, CassetteTransport
@@ -71,6 +73,7 @@ from sentinel.ingestion.fingerprint import fingerprint as compute_fingerprint
 from sentinel.ingestion.fingerprint import normalize_title
 from sentinel.integrations.base import compute_hmac_sha256
 from sentinel.persistence.repositories import EvalCaseResultRecord
+from sentinel.schemas.api import IncidentDetailResponse
 from sentinel.schemas.context import (
     DeployItem,
     FetcherResult,
@@ -162,6 +165,11 @@ class RunnerDeps:
     webhook_secret: SecretStr
     poll_timeout_s: float = 60.0
     poll_interval_s: float = 0.25
+    # Agent-level deps for the in-memory shots 1+ path (multi-shot stability,
+    # #49). The CLI sets this from ``app.state.diagnosis_deps``; ``None`` is
+    # only valid for single-shot runs (run_corpus raises otherwise). Tests that
+    # exercise multi-shot supply a sentinel and override ``diagnose`` directly.
+    diagnosis_deps: DiagnosisDeps | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +207,15 @@ async def run_corpus(
     """
     if shots_per_case < 1:
         raise ValueError(f"shots_per_case must be >= 1, got {shots_per_case}")
+    # Shots 1+ run the in-memory diagnose() path (Option 3, #49); they require
+    # the agent-level DiagnosisDeps. Fail loud at entry rather than discovering
+    # the missing wiring mid-corpus after shot 0 of case 1 already persisted.
+    if shots_per_case > 1 and runner_deps.diagnosis_deps is None:
+        raise ValueError(
+            "shots_per_case > 1 requires runner_deps.diagnosis_deps "
+            "(the in-memory shots 1+ path calls diagnose() directly); "
+            "set it from app.state.diagnosis_deps"
+        )
 
     per_case_shots: dict[str, list[MetricSet]] = {case.id: [] for case in cases}
 
@@ -213,6 +230,10 @@ async def run_corpus(
         REGISTRY.set(case)
         try:
             for shot_index in range(shots_per_case):
+                # Stamp the cassette key for every shot — shot 0's diagnosis
+                # runs inside the diagnoser consumer, shots 1+ inside
+                # _run_in_memory_shot, but both resolve their Anthropic response
+                # through the same transport keyed on (… , shot_index).
                 if runner_deps.cassette_transport is not None:
                     runner_deps.cassette_transport.set_context(
                         CassetteContext(
@@ -222,51 +243,27 @@ async def run_corpus(
                             shot_index=shot_index,
                         )
                     )
-                incident_id, case_status, diagnosis = await _fire_and_poll(
-                    case, runner_deps, shot_index=shot_index
-                )
-                error_detail: str | None = None
-                if case_status == "ok" and diagnosis is not None:
-                    metrics = await _score(diagnosis, case, runner_deps.embed)
+                if shot_index == 0:
+                    # Canonical shot: full webhook → Kafka → enrich → diagnose
+                    # pipeline, persisted as the single EvalCaseResultRecord for
+                    # this case. The production fingerprint + idempotency
+                    # contract is exercised here and only here.
+                    metrics = await _full_pipeline_shot(case, runner_deps)
                 else:
-                    metrics = MetricSet(
-                        category_match=0.0,
-                        hypothesis_cosine=0.0,
-                        action_coverage=0.0,
-                        evidence_quality=None,
-                    )
-                    error_detail = (
-                        "webhook ingest did not return 202"
-                        if case_status == "ingest_failed"
-                        else f"diagnosis poll timed out after {runner_deps.poll_timeout_s}s"
-                    )
-
-                shot = EvalCaseResultRecord(
-                    run_id=runner_deps.run_id,
-                    case_id=case.id,
-                    shot_index=shot_index,
-                    case_status=case_status,
-                    metrics={
-                        "category_match": metrics.category_match,
-                        "hypothesis_cosine": metrics.hypothesis_cosine,
-                        "action_coverage": metrics.action_coverage,
-                        "evidence_quality": metrics.evidence_quality,
-                    },
-                    raw_response=None,
-                    diagnosis=_persisted_to_dict(diagnosis) if diagnosis is not None else None,
-                    incident_id=incident_id,
-                    incident_fingerprint=compute_fingerprint(
-                        case.alert.service,
-                        normalize_title(case.alert.title),
-                        case.alert.severity,
-                    ),
-                    incident_title=case.alert.title,
-                    incident_severity=case.alert.severity,
-                    token_usage=dict(diagnosis.token_usage) if diagnosis is not None else None,
-                    latency_ms=diagnosis.latency_ms if diagnosis is not None else None,
-                    error_detail=error_detail,
-                )
-                await runner_deps.eval_run_repo.persist_shot(shot)
+                    # Stability shots: direct in-memory diagnose() call against
+                    # an IncidentContext rebuilt from the corpus seed. NOT
+                    # persisted (no incident row to FK against) — these exist
+                    # only to measure LLM-call non-determinism, decoupled from
+                    # the production idempotency contract. See
+                    # docs/adr/0009-stability-at-llm-call-level.md.
+                    metrics = await _run_in_memory_shot(case, runner_deps, shot_index=shot_index)
+                # Shot 0 (pipeline) and shots 1+ (in-memory) both land here, so
+                # the per-case stddev spans all shots. For that stddev to mean
+                # "LLM-call wobble" and not "context-path divergence", the two
+                # paths must feed diagnose() an equivalent IncidentContext: the
+                # pipeline enriches via corpus_fetchers, the in-memory path
+                # rebuilds via _seed_to_incident_context — both derived from the
+                # same corpus seed and kept in sync.
                 per_case_shots[case.id].append(metrics)
         finally:
             # Clear the registry between cases so a stray late callback (e.g.
@@ -290,6 +287,131 @@ async def run_corpus(
 
 
 # --- Helpers --------------------------------------------------------------- #
+
+
+async def _full_pipeline_shot(case: CorpusCase, deps: RunnerDeps) -> MetricSet:
+    """Shot 0: drive the full webhook→Kafka→enrich→diagnose pipeline, score the
+    result, and persist the one canonical ``EvalCaseResultRecord`` for the case.
+
+    Returns the shot's ``MetricSet`` (also appended to the per-case stability
+    list by the caller). All three terminal case states (ok / ingest_failed /
+    timeout) produce a persisted record; non-ok states carry zeroed metrics and
+    ``evidence_quality=None``.
+    """
+    incident_id, case_status, diagnosis = await _fire_and_poll(case, deps, shot_index=0)
+    error_detail: str | None = None
+    if case_status == "ok" and diagnosis is not None:
+        metrics = await _score(diagnosis, case, deps.embed)
+    else:
+        metrics = MetricSet(
+            category_match=0.0,
+            hypothesis_cosine=0.0,
+            action_coverage=0.0,
+            evidence_quality=None,
+        )
+        error_detail = (
+            "webhook ingest did not return 202"
+            if case_status == "ingest_failed"
+            else f"diagnosis poll timed out after {deps.poll_timeout_s}s"
+        )
+
+    shot = EvalCaseResultRecord(
+        run_id=deps.run_id,
+        case_id=case.id,
+        shot_index=0,
+        case_status=case_status,
+        metrics={
+            "category_match": metrics.category_match,
+            "hypothesis_cosine": metrics.hypothesis_cosine,
+            "action_coverage": metrics.action_coverage,
+            "evidence_quality": metrics.evidence_quality,
+        },
+        raw_response=None,
+        diagnosis=_persisted_to_dict(diagnosis) if diagnosis is not None else None,
+        incident_id=incident_id,
+        incident_fingerprint=compute_fingerprint(
+            case.alert.service,
+            normalize_title(case.alert.title),
+            case.alert.severity,
+        ),
+        incident_title=case.alert.title,
+        incident_severity=case.alert.severity,
+        token_usage=dict(diagnosis.token_usage) if diagnosis is not None else None,
+        latency_ms=diagnosis.latency_ms if diagnosis is not None else None,
+        error_detail=error_detail,
+    )
+    await deps.eval_run_repo.persist_shot(shot)
+    return metrics
+
+
+async def _run_in_memory_shot(
+    case: CorpusCase,
+    deps: RunnerDeps,
+    *,
+    shot_index: int,
+) -> MetricSet:
+    """Shots 1+: call ``diagnose`` directly against an IncidentContext rebuilt
+    from the corpus seed, bypassing the webhook→Kafka→DB pipeline entirely.
+
+    Why bypass the pipeline (Option 3, #49): the production fingerprint dedup +
+    ``uq_diagnoses_incident_prompt_model`` idempotency would collapse shots 1+
+    onto shot 0's persisted diagnosis (same fingerprint within the dedup
+    window), so a pipeline shot 1 can never produce an independent LLM call.
+    Calling ``diagnose`` directly gives each shot its own Anthropic call —
+    resolved through the same cassette transport (the caller stamped the
+    ``shot_index`` key) — which is exactly the non-determinism the stability
+    stddev measures. These shots are deliberately NOT persisted: there is no
+    incident row to FK against, and persistence measures the production
+    idempotency contract, which is a different thing from LLM-call stability.
+    See docs/adr/0009-stability-at-llm-call-level.md.
+    """
+    # Guaranteed non-None: run_corpus refuses shots_per_case > 1 without it.
+    if deps.diagnosis_deps is None:  # pragma: no cover — run_corpus guards this
+        raise RuntimeError(
+            "in-memory shot requires diagnosis_deps; run_corpus should have guarded it"
+        )
+    ctx = _seed_to_incident_context(case)
+    incident = _fabricate_incident(case, ctx, shot_index=shot_index)
+    diagnosis = await diagnose(incident, ctx, deps.diagnosis_deps)
+    return await _score(diagnosis, case, deps.embed)
+
+
+def _fabricate_incident(
+    case: CorpusCase,
+    ctx: IncidentContext,
+    *,
+    shot_index: int,
+) -> IncidentDetailResponse:
+    """Build a throwaway ``IncidentDetailResponse`` to feed ``diagnose`` for an
+    in-memory shot.
+
+    Mirrors the shape the pipeline would persist for this case: same service /
+    severity / title / fingerprint, a per-shot ``external_id`` for traceability
+    in the audit log, and a fresh ``id`` (no DB row is keyed to it). ``context``
+    is left ``None`` because ``diagnose`` serializes the ``ctx`` argument, not
+    ``incident.context``.
+    """
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    return IncidentDetailResponse(
+        id=uuid4(),
+        source=case.alert.source,
+        external_id=f"{case.id}-shot-{shot_index}",
+        service=case.alert.service,
+        severity=case.alert.severity,
+        status="open",
+        title=case.alert.title,
+        fingerprint=compute_fingerprint(
+            case.alert.service,
+            normalize_title(case.alert.title),
+            case.alert.severity,
+        ),
+        opened_at=datetime.now(UTC),
+        resolved_at=None,
+        context=None,
+        diagnoses=[],
+    )
 
 
 async def _fire_and_poll(
