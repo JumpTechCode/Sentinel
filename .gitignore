@@ -110,6 +110,9 @@ yarn-error.log*
 # Docker
 .docker/
 
+# Generated build artifacts
+openapi.json
+
 # Eval results — generated, never hand-edited
 evals/results/*.json
 evals/results/*.html
