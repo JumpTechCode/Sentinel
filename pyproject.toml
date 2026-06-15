@@ -48,6 +48,7 @@ dev = [
   "fakeredis>=2.20,<3.0",
   "hypothesis>=6.100,<7.0",
   "locust>=2.32,<3",
+  "toxiproxy-python>=0.1,<1.0",
   "types-pyyaml>=6.0,<7",
   "pre-commit>=4,<5",
 ]
@@ -109,7 +110,7 @@ files = ["sentinel", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["aiokafka.*", "asyncpg.*", "testcontainers.*", "locust.*", "pgvector.*", "fastembed.*"]
+module = ["aiokafka.*", "asyncpg.*", "testcontainers.*", "locust.*", "pgvector.*", "fastembed.*", "toxiproxy.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -118,6 +119,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
   "integration: requires docker-compose services (postgres, redis, kafka)",
+  "load: locust-driven load test; excluded from default and PR CI (run via `make load`)",
+  "chaos: toxiproxy / fault-injection resilience test; excluded from default and PR CI (run via `make chaos`)",
 ]
 filterwarnings = [
   "error::DeprecationWarning",

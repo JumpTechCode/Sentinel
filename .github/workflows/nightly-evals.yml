@@ -45,6 +45,11 @@ jobs:
       SENTINEL_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       SENTINEL_GENERIC_WEBHOOK_SECRET: nightly-eval-secret
       SENTINEL_EMBEDDING_MODEL_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
+      # Disable tqdm during the fastembed model download — its threaded
+      # progress-bar cleanup crashes on the CI runner (tqdm `_lock`
+      # AttributeError in thread_map). See ci.yml evals-gate for detail.
+      TQDM_DISABLE: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # for `gh issue` in the drift step
 
     steps:

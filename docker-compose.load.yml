@@ -1,0 +1,13 @@
+# Overlay for `make load`.
+#
+# Disables the diagnosis + memory consumers so load traffic exercises the
+# ingestion path only and never calls the Anthropic API, and pins a known
+# webhook secret matching tests/load/locustfile.py's default.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.load.yml up -d --wait
+services:
+  app:
+    environment:
+      SENTINEL_DIAGNOSIS_CONSUMER_ENABLED: "false"
+      SENTINEL_MEMORY_CONSUMER_ENABLED: "false"
+      SENTINEL_GENERIC_WEBHOOK_SECRET: "loadtest-secret"

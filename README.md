@@ -137,7 +137,7 @@ Built work area by work area, each behind a green CI gate. The eval harness (K) 
 | 7 | API surface (I) — REST + SSE/WS, `/readyz` dependency checks, OpenAPI publish | ⏳ Planned |
 | 8 | Eval harness (K) — postmortem corpus, scoring, multi-shot stability, CI gate + nightly full | ✅ Landed |
 | 9 | UI (L) — Next.js incident view | ⏳ Planned |
-| 10 | Load + chaos (M) — Locust, Toxiproxy | ⏳ Planned |
+| 10 | Load + chaos (M) — Locust ingestion load, Toxiproxy Redis-outage + in-process breaker fault injection | ✅ Landed |
 
 Designs and per-phase plans live in [`plans/`](plans/).
 
@@ -187,8 +187,16 @@ make migrate-down              # alembic downgrade -1
 make evals-smoke               # 5-case smoke set (cassette replay)
 make evals                     # full corpus      (cassette replay)
 make readme-numbers            # patch README from the latest eval run
+make load-smoke                # concurrent-ingestion invariants (zero-drop + p95); needs docker
+make load                      # locust 100 req/s x 5min, consumers-off stack (creditless)
+make chaos                     # resilience: breaker fault-injection + toxiproxy Redis outage
 make openapi                   # export OpenAPI JSON     (placeholder until Work Area I)
 ```
+
+`make load` and `make chaos` never call the Anthropic API: load runs the stack
+with the diagnosis + memory consumers disabled, and chaos does the same for its
+infra-outage tests (B1) or injects faults entirely in-process (B2). See
+[ADR 0010](docs/adr/0010-chaos-toxiproxy-vs-fault-injection.md).
 
 Single test:
 
