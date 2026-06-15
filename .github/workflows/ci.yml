@@ -116,6 +116,14 @@ jobs:
       # runner. Point it at the workspace so the eval scorer can download/
       # cache the embedding model under a writable path.
       SENTINEL_EMBEDDING_MODEL_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
+      # Disable tqdm during the fastembed/HuggingFace model download. tqdm's
+      # threaded progress-bar cleanup crashes on the CI runner (AttributeError:
+      # type object 'tqdm' has no attribute '_lock', in thread_map →
+      # _decr_instances); a disabled tqdm short-circuits close() before that
+      # path. Dep versions are unchanged from the last green run — this is an
+      # environment/timing fragility in the live download, not a code regression.
+      TQDM_DISABLE: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
     steps:
       - uses: actions/checkout@v4
 
