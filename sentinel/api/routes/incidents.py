@@ -13,10 +13,12 @@ retrieved from `request.app.state.incident_repo`, matching the `resolve.py` /
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, Request
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from sentinel.persistence.repositories import IncidentRepository
-from sentinel.schemas.api import IncidentListResponse
+from sentinel.schemas.api import IncidentDetailResponse, IncidentListResponse
 from sentinel.schemas.enums import IncidentStatusType, SeverityType
 
 router = APIRouter(tags=["incidents"])
@@ -44,3 +46,23 @@ async def list_incidents(
         offset=offset,
     )
     return IncidentListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get(
+    "/incidents/{incident_id}",
+    response_model=IncidentDetailResponse,
+    responses={404: {"description": "Incident not found"}},
+)
+async def get_incident(incident_id: UUID, request: Request) -> IncidentDetailResponse:
+    repo: IncidentRepository = request.app.state.incident_repo
+    detail = await repo.get(incident_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="incident_not_found")
+    # Enrichment context is stored separately (JSONB read-back); fold it in.
+    # Diagnoses are deferred to PR 2 — the wire `Diagnosis` model requires
+    # evidence min_length=1, which a fully-hallucinated PersistedDiagnosis
+    # cannot satisfy. PR 2 introduces the relaxed view model.
+    stored = await repo.get_enrichment_context(incident_id)
+    if stored is not None:
+        detail = detail.model_copy(update={"context": stored.context})
+    return detail
