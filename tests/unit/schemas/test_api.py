@@ -13,6 +13,7 @@ from sentinel.schemas.api import (
     HealthResponse,
     IncidentDetailResponse,
     IncidentListItem,
+    IncidentListResponse,
     ResolveIncidentRequest,
     WebhookAcceptedResponse,
 )
@@ -185,3 +186,20 @@ def test_webhook_accepted_response_allows_recurred() -> None:
 def test_webhook_accepted_response_rejects_unknown_status() -> None:
     with pytest.raises(ValidationError):
         WebhookAcceptedResponse.model_validate({"status": "something_else", "incident_id": None})
+
+
+def test_incident_list_response_round_trips() -> None:
+    item = IncidentListItem(
+        id=uuid4(),
+        service="checkout",
+        severity="SEV1",
+        status="open",
+        title="500s spiking",
+        opened_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
+    )
+    resp = IncidentListResponse(items=[item], total=1, limit=50, offset=0)
+    dumped = resp.model_dump(mode="json")
+    assert dumped["total"] == 1
+    assert dumped["limit"] == 50
+    assert dumped["offset"] == 0
+    assert len(dumped["items"]) == 1
