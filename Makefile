@@ -11,7 +11,7 @@ PIP := $(VENV)/bin/pip
 .PHONY: help bootstrap fmt lint typecheck test test-unit test-integration \
         migrate migrate-down evals evals-smoke evals-record evals-baseline \
         evals-compare evals-reset \
-        readme-numbers load chaos compose-up compose-down openapi clean
+        readme-numbers load load-smoke chaos compose-up compose-down openapi clean
 
 help:  ## Show available targets
 	@awk 'BEGIN{FS=":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*##/ {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -83,11 +83,17 @@ evals-baseline:  ## Write evals/baselines/main.json from a fresh corpus replay
 readme-numbers:  ## Patch README between evals:start/end markers from latest run
 	$(PY) -m sentinel.evals readme
 
-load:  ## Locust load test (placeholder until Work Area M)
-	@echo "load: not implemented yet (Work Area M)"; exit 0
+load:  ## Locust load: 100 req/s x 5min against a consumers-off stack (creditless)
+	docker compose -f docker-compose.yml -f docker-compose.load.yml up -d --wait
+	$(VENV)/bin/locust -f tests/load/locustfile.py --host http://localhost:8000 \
+		--headless -u 100 -r 50 -t 5m --only-summary
+	@echo "Stack left up for inspection; 'make compose-down' to tear down."
 
-chaos:  ## Toxiproxy chaos test (placeholder until Work Area M)
-	@echo "chaos: not implemented yet (Work Area M)"; exit 0
+load-smoke:  ## Fast in-process load invariants (zero-drop + p95); needs docker
+	$(PY) -m pytest tests/load -v -m load --no-cov
+
+chaos:  ## Resilience suite: breaker fault-injection (B2) + toxiproxy Redis outage (B1)
+	$(PY) -m pytest tests/chaos -v -m chaos --no-cov
 
 compose-up:  ## docker compose up -d
 	docker compose up -d --wait
