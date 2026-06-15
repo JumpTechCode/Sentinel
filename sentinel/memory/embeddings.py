@@ -46,14 +46,25 @@ class FastEmbedProvider:
         async with self._lock:
             if self._model is not None:
                 return
-            from fastembed import TextEmbedding
+            # Offload the blocking model construction (downloads MODEL_NAME +
+            # ONNX init — several seconds on a cold cache) to a thread. Doing it
+            # inline stalls the event loop for that whole window, which starves
+            # Kafka consumer heartbeats and triggers a group rebalance that
+            # crashes the enrichment consumer (observed in CI under a cold
+            # FastEmbed cache during a multi-shot eval run). Per-call embeds are
+            # already offloaded in embed(); the load is the missing half.
+            loop = asyncio.get_running_loop()
+            self._model = await loop.run_in_executor(None, self._load_model)
 
-            _LOG.info(
-                "loading_embedding_model",
-                extra={"model": self._model_name, "cache_dir": str(self._cache_dir)},
-            )
-            self._cache_dir.mkdir(parents=True, exist_ok=True)
-            self._model = TextEmbedding(model_name=self._model_name, cache_dir=str(self._cache_dir))
+    def _load_model(self) -> TextEmbedding:
+        from fastembed import TextEmbedding
+
+        _LOG.info(
+            "loading_embedding_model",
+            extra={"model": self._model_name, "cache_dir": str(self._cache_dir)},
+        )
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        return TextEmbedding(model_name=self._model_name, cache_dir=str(self._cache_dir))
 
     def _embed_sync(self, text: str) -> list[float]:
         if self._model is None:
