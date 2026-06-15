@@ -198,6 +198,19 @@ def test_parser_record_defaults_no_persist_true() -> None:
     assert args.no_persist is True
 
 
+def test_parser_shots_default_is_three_for_run_baseline_record() -> None:
+    """--shots defaults to 3 across run/baseline/record (#49 multi-shot stability).
+
+    Shot 0 is the persisted/scored pipeline shot; shots 1+ measure LLM-call
+    stability via the in-memory diagnose() path. Default 3 gives a meaningful
+    per-case stddev without being wasteful.
+    """
+    parser = cli._build_parser()
+    assert parser.parse_args(["run"]).shots == 3
+    assert parser.parse_args(["baseline"]).shots == 3
+    assert parser.parse_args(["record", "--corpus", "corpus"]).shots == 3
+
+
 # --- compare-to-baseline (paired-bootstrap regression gate) ----------------- #
 
 

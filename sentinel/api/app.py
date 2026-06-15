@@ -23,6 +23,7 @@ from sentinel.config.settings import load_settings
 from sentinel.diagnosis.agent import diagnose as diagnose_fn
 from sentinel.diagnosis.consumer import DiagnosisConsumer
 from sentinel.diagnosis.deps import ConsumerDeps as DiagnosisConsumerDeps
+from sentinel.diagnosis.deps import DiagnosisDeps
 from sentinel.diagnosis.llm_client import AnthropicClient
 from sentinel.diagnosis.prompt import PromptBundle
 from sentinel.enrichment import (
@@ -283,6 +284,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     diagnoser: DiagnosisConsumer | None = None
     cassette_http_client: httpx.AsyncClient | None = None
     cassette_transport: CassetteTransport | None = None
+    # Agent-level deps the eval runner uses to invoke diagnose() directly for
+    # in-memory shots 1+ (multi-shot stability, #49). None unless the diagnosis
+    # consumer is wired (which eval mode requires); the runner guards on it.
+    agent_diagnosis_deps: DiagnosisDeps | None = None
     if settings.diagnosis_consumer_enabled:
         diag_kafka_consumer = AIOKafkaConsumer(
             settings.kafka_topic_incidents,
@@ -320,6 +325,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             diagnosis_repo=diagnosis_repo,
             audit_logger=audit_logger,
         )
+        agent_diagnosis_deps = diagnosis_deps.agent_deps()
         diagnoser = DiagnosisConsumer(
             consumer=diag_kafka_consumer,
             deps=diagnosis_deps,
@@ -344,6 +350,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Stashed unconditionally (None when not eval mode or no cassette dir) so
     # the runner can rely on `app.state.cassette_transport` existing.
     app.state.cassette_transport = cassette_transport
+    # Same rationale for the agent-level diagnosis deps: the eval runner reads
+    # this off app.state to drive in-memory shots 1+ (#49). None when the
+    # diagnosis consumer isn't wired; the runner raises if multi-shot is
+    # requested without it.
+    app.state.diagnosis_deps = agent_diagnosis_deps
 
     handler = WebhookHandler(
         incident_repo=incident_repo,

@@ -1,14 +1,14 @@
 {
   "aggregate_metrics": {
-    "action_coverage": 0.756549362397634,
+    "action_coverage": 0.7532123879901762,
     "category_match": 0.9,
     "evidence_quality": 1.0,
-    "hypothesis_cosine": 0.8147111392920001
+    "hypothesis_cosine": 0.816551618891812
   },
-  "git_sha": "3b9b8e2a462eba2a74cb9649c981af63aa90a5ad",
+  "git_sha": "72b4e6ffe741133d039194216d03281a98c1a5d9",
   "headline": {
-    "mean_stability": 0.0,
-    "pass_rate_strict": 0.9
+    "mean_stability": 0.038756588034004516,
+    "pass_rate_strict": 0.8
   },
   "model_id": "claude-sonnet-4-5",
   "name": "main",
@@ -16,155 +16,155 @@
     {
       "case_id": "atlassian-2022-04-04-deletion",
       "metrics": {
-        "action_coverage": 0.7409448594179419,
+        "action_coverage": 0.7227233523052944,
         "category_match": 1.0,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.8748710888033195
+        "hypothesis_cosine": 0.859749312932653
       },
       "stability": {
-        "action_coverage": 0.0,
+        "action_coverage": 0.03961283365626561,
         "category_match": 0.0,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.021008731582719896
       }
     },
     {
       "case_id": "aws-2021-12-07-useast1",
       "metrics": {
-        "action_coverage": 0.7625566046502706,
+        "action_coverage": 0.7688066285485293,
         "category_match": 1.0,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.8164198535724162
+        "hypothesis_cosine": 0.8630601555157646
       },
       "stability": {
-        "action_coverage": 0.0,
+        "action_coverage": 0.0049543728983181086,
         "category_match": 0.0,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.01413480593227432
       }
     },
     {
       "case_id": "cloudflare-2019-07-02-regex",
       "metrics": {
-        "action_coverage": 0.7558873278917249,
+        "action_coverage": 0.7766086764456156,
         "category_match": 1.0,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.8031966340956032
+        "hypothesis_cosine": 0.8136593196014853
       },
       "stability": {
-        "action_coverage": 0.0,
+        "action_coverage": 0.022669347216469918,
         "category_match": 0.0,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.04851165106783002
       }
     },
     {
       "case_id": "cloudflare-2022-06-21-bgp",
       "metrics": {
-        "action_coverage": 0.7741509011974942,
+        "action_coverage": 0.758474766326588,
         "category_match": 1.0,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.8988926800581386
+        "hypothesis_cosine": 0.8684622352240078
       },
       "stability": {
-        "action_coverage": 0.0,
+        "action_coverage": 0.003176231335666358,
         "category_match": 0.0,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.039518072425481124
       }
     },
     {
       "case_id": "fastly-2021-06-08-config",
       "metrics": {
-        "action_coverage": 0.851446140159983,
+        "action_coverage": 0.8229764986646799,
         "category_match": 1.0,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.7485379348196196
+        "hypothesis_cosine": 0.7608583621149481
       },
       "stability": {
-        "action_coverage": 0.0,
+        "action_coverage": 0.004028421540517125,
         "category_match": 0.0,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.02538215610877112
       }
     },
     {
       "case_id": "github-2018-10-21-network",
       "metrics": {
-        "action_coverage": 0.7496683452393419,
-        "category_match": 0.0,
+        "action_coverage": 0.7359820774805419,
+        "category_match": 0.3333333333333333,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.7671617610975605
+        "hypothesis_cosine": 0.7664705747937708
       },
       "stability": {
-        "action_coverage": 0.0,
-        "category_match": 0.0,
+        "action_coverage": 0.0058595059461008184,
+        "category_match": 0.5773502691896257,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.016103001571508527
       }
     },
     {
       "case_id": "gitlab-2017-01-31-db-deletion",
       "metrics": {
-        "action_coverage": 0.7100926877655149,
+        "action_coverage": 0.7239052837598826,
         "category_match": 1.0,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.7903683669300914
+        "hypothesis_cosine": 0.7932164646676348
       },
       "stability": {
-        "action_coverage": 0.0,
+        "action_coverage": 0.011184314125463963,
         "category_match": 0.0,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.0073998732281939615
       }
     },
     {
       "case_id": "roblox-2021-10-28-consul",
       "metrics": {
-        "action_coverage": 0.7524432899166716,
-        "category_match": 1.0,
+        "action_coverage": 0.7466910033460566,
+        "category_match": 0.6666666666666666,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.8148382006453656
+        "hypothesis_cosine": 0.8002963807230401
       },
       "stability": {
-        "action_coverage": 0.0,
-        "category_match": 0.0,
+        "action_coverage": 0.02164431435283472,
+        "category_match": 0.5773502691896257,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.033108386921646436
       }
     },
     {
       "case_id": "slack-2021-01-04-dns",
       "metrics": {
-        "action_coverage": 0.7029078448553998,
+        "action_coverage": 0.7041648339878138,
         "category_match": 1.0,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.7870494166691266
+        "hypothesis_cosine": 0.8035740987571827
       },
       "stability": {
-        "action_coverage": 0.0,
+        "action_coverage": 0.005229232982421932,
         "category_match": 0.0,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.05214451299402706
       }
     },
     {
       "case_id": "stripe-2019-07-10-db-failover",
       "metrics": {
-        "action_coverage": 0.765395622881997,
+        "action_coverage": 0.7717907590367604,
         "category_match": 1.0,
         "evidence_quality": 1.0,
-        "hypothesis_cosine": 0.8457754562287604
+        "hypothesis_cosine": 0.8361692845876328
       },
       "stability": {
-        "action_coverage": 0.0,
+        "action_coverage": 0.014286696142416743,
         "category_match": 0.0,
         "evidence_quality": 0.0,
-        "hypothesis_cosine": 0.0
+        "hypothesis_cosine": 0.00560652095200141
       }
     }
   ],
   "prompt_version": "v1",
-  "recorded_at": "2026-05-21T01:43:03.325424+00:00",
-  "run_id": "c452c481-6d36-41d8-9a1b-c2dd8858547a"
+  "recorded_at": "2026-06-15T18:09:30.223294+00:00",
+  "run_id": "e7128643-f3f2-4101-9513-ad381fbd4b99"
 }

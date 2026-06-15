@@ -21,12 +21,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from pydantic import SecretStr
+from sentinel.diagnosis.deps import DiagnosisDeps
 from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.evals.runner import (
     EvalCaseResultRecord,
@@ -45,6 +46,7 @@ from sentinel.evals.schema import (
     MetricSet,
 )
 from sentinel.schemas.diagnosis import EvidenceRef, SuggestedAction
+from sentinel.schemas.enums import CategoryType
 
 # --- Fakes ----------------------------------------------------------------- #
 
@@ -174,7 +176,7 @@ def _build_case(case_id: str = "test-case") -> CorpusCase:
     )
 
 
-def _build_persisted_diagnosis() -> PersistedDiagnosis:
+def _build_persisted_diagnosis(likely_category: CategoryType = "config") -> PersistedDiagnosis:
     return PersistedDiagnosis(
         hypothesis="BGP misconfig",
         confidence=Decimal("0.8"),
@@ -189,7 +191,7 @@ def _build_persisted_diagnosis() -> PersistedDiagnosis:
                 requires_human_approval=True,
             )
         ],
-        likely_category="config",
+        likely_category=likely_category,
         hallucinated_evidence=False,
         model="claude-sonnet-4-5",
         prompt_version="v1",
@@ -217,6 +219,7 @@ def _build_deps(
     diagnosis: PersistedDiagnosis | None = None,
     poll_timeout_s: float = 0.2,
     poll_interval_s: float = 0.02,
+    diagnosis_deps: DiagnosisDeps | None = None,
 ) -> _DepsBundle:
     client = FakeClient(
         status_code=client_status,
@@ -242,6 +245,7 @@ def _build_deps(
         webhook_secret=SecretStr("test-secret"),
         poll_timeout_s=poll_timeout_s,
         poll_interval_s=poll_interval_s,
+        diagnosis_deps=diagnosis_deps,
     )
     bundle = _DepsBundle(
         deps=deps,
@@ -421,56 +425,95 @@ def test_run_result_aggregation_empty_cases() -> None:
     assert agg.evidence_quality is None
 
 
-# --- T12 / T13: regression tests for the eval harness wiring ---------------- #
+# --- Multi-shot stability mechanism (#49) ----------------------------------- #
+
+# Shots 1+ call ``sentinel.evals.runner.diagnose`` directly. Unit tests
+# monkeypatch that name and pass this sentinel DiagnosisDeps — the multishot
+# guard only checks it is not None, and the fake diagnose never dereferences
+# it — so the orchestration is exercised without a live LLM or a cassette.
+_SENTINEL_DIAGNOSIS_DEPS = cast(DiagnosisDeps, object())
 
 
 @pytest.mark.asyncio
-async def test_per_shot_external_id_is_distinct_across_shots() -> None:
-    # Regression (2026-05-20): a previous runner reused the same external_id
-    # for every shot of a case, which collided with the incident-recurred /
-    # fingerprint-dedup logic and made shots 2+ overwrite shot 0's incident
-    # row. Result: per-shot diagnoses bled into each other. Fix: encode the
-    # shot index into the webhook payload's external id so each shot is a
-    # distinct incident from the system's perspective.
+async def test_multishot_requires_diagnosis_deps() -> None:
+    # run_corpus must fail loud at entry when shots > 1 is requested without the
+    # in-memory diagnose deps, rather than discovering the gap mid-corpus after
+    # shot 0 of case 1 has already persisted a row.
+    case = _build_case()
+    bundle = _build_deps(diagnosis=_build_persisted_diagnosis())  # diagnosis_deps=None
+
+    with pytest.raises(ValueError, match="diagnosis_deps"):
+        await run_corpus(cases=[case], shots_per_case=2, runner_deps=bundle.deps)
+
+
+@pytest.mark.asyncio
+async def test_in_memory_shots_bypass_pipeline_and_are_not_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The multi-shot contract (#49): shot 0 runs the full webhook→diagnose
+    # pipeline and is the ONLY persisted row; shots 1+ call diagnose() directly
+    # in-memory (no webhook, no incident row, no persist_shot). Bypassing the
+    # pipeline for shots 1+ is what makes per-shot stability meaningful — a
+    # pipeline shot 1 would collapse onto shot 0's diagnosis via fingerprint
+    # dedup + uq_diagnoses_incident_prompt_model and never produce an
+    # independent LLM call. This also subsumes the old "distinct external_id
+    # per shot" regression: with only shot 0 hitting the pipeline there is a
+    # single incident row per case, so cross-shot collisions are structurally
+    # impossible.
     import json
 
     case = _build_case()
     bundle = _build_deps(
-        diagnosis=_build_persisted_diagnosis(),
+        diagnosis=_build_persisted_diagnosis("config"),  # shot 0 → category match 1.0
         client_body={"incident_id": str(uuid4())},
+        diagnosis_deps=_SENTINEL_DIAGNOSIS_DEPS,
     )
 
-    await run_corpus(cases=[case], shots_per_case=3, runner_deps=bundle.deps)
+    in_memory_calls = {"n": 0}
 
-    # Every shot posts one webhook → 3 requests for shots_per_case=3.
-    assert len(bundle.client.requests) == 3
-    external_ids: list[str] = []
-    for _url, body, _hdrs in bundle.client.requests:
-        payload = json.loads(body)
-        # The corpus uses `id` as the external_id field on the webhook body.
-        external_ids.append(payload["id"])
+    async def fake_diagnose(incident: Any, ctx: Any, deps: Any) -> PersistedDiagnosis:
+        in_memory_calls["n"] += 1
+        # Mismatching category → shots 1,2 score 0.0 on category, so the 3-shot
+        # category series is [1.0, 0.0, 0.0] and its sample stddev is non-zero.
+        return _build_persisted_diagnosis("capacity")
 
-    assert len(set(external_ids)) == 3, f"shots must use distinct external_ids; got {external_ids}"
-    # And the shot index must be embedded in the id so the source is
-    # debuggable from a webhook log alone.
-    for i, ext_id in enumerate(external_ids):
-        assert (
-            f"shot-{i}" in ext_id
-        ), f"shot {i} external_id {ext_id!r} should encode its shot index"
+    monkeypatch.setattr("sentinel.evals.runner.diagnose", fake_diagnose)
+
+    result = await run_corpus(cases=[case], shots_per_case=3, runner_deps=bundle.deps)
+
+    # Only shot 0 hit the webhook pipeline, with a shot-indexed external_id.
+    assert len(bundle.client.requests) == 1
+    posted = json.loads(bundle.client.requests[0][1])
+    assert posted["id"] == f"{case.id}-shot-0"
+    # Shots 1 and 2 went through the direct in-memory diagnose path.
+    assert in_memory_calls["n"] == 2
+    # Exactly one persisted row (the canonical shot 0) — no shadow rows for 1+.
+    assert len(bundle.eval_run_repo.shots) == 1
+    assert bundle.eval_run_repo.shots[0].shot_index == 0
+    # Stability is computed across all 3 shots → non-zero category stddev.
+    assert result.stability[case.id]["category_match"] > 0.0
 
 
 @pytest.mark.asyncio
-async def test_truncate_runs_once_per_case_not_once_per_shot() -> None:
+async def test_truncate_runs_once_per_case_not_once_per_shot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Regression (2026-05-20): an earlier runner truncated the incidents/
     # diagnoses tables between every shot, which raced with the async
     # enricher/diagnoser consumers still processing the previous shot's
-    # events and produced FK violations
-    # (`diagnoses_incident_id_fkey`). The fix moved truncate to per-case
-    # cadence because each shot now uses a distinct external_id (see
-    # test above) so cross-shot state contamination within a case isn't a
-    # concern. This test pins the cadence: N cases x M shots == N truncates.
+    # events and produced FK violations (`diagnoses_incident_id_fkey`). The fix
+    # moved truncate to per-case cadence. This test pins the cadence:
+    # N cases x M shots == N truncates (truncate lives outside the shot loop).
+    async def fake_diagnose(incident: Any, ctx: Any, deps: Any) -> PersistedDiagnosis:
+        return _build_persisted_diagnosis()
+
+    monkeypatch.setattr("sentinel.evals.runner.diagnose", fake_diagnose)
+
     cases = [_build_case(case_id=f"c-{i}") for i in range(4)]
-    bundle = _build_deps(diagnosis=_build_persisted_diagnosis())
+    bundle = _build_deps(
+        diagnosis=_build_persisted_diagnosis(),
+        diagnosis_deps=_SENTINEL_DIAGNOSIS_DEPS,
+    )
 
     await run_corpus(cases=cases, shots_per_case=2, runner_deps=bundle.deps)
 

@@ -122,13 +122,13 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--shots",
         type=int,
-        default=1,
+        default=3,
         help=(
-            "shots per case (default: 1). Multi-shot is structurally limited by "
-            "the uq_diagnoses_incident_prompt_model uniqueness constraint — "
-            "shots 2+ silently collapse onto shot 0's persisted diagnosis. Set "
-            ">1 only if you've also removed the constraint or arranged for "
-            "per-shot fingerprint divergence."
+            "shots per case (default: 3). Shot 0 runs the full webhook→diagnose "
+            "pipeline and is the persisted, scored, baseline-able shot; shots 1+ "
+            "call diagnose() directly in-memory to measure LLM-call stability "
+            "without colliding on the uq_diagnoses_incident_prompt_model "
+            "idempotency (see #49 / docs/adr/0009). Set to 1 to skip stability."
         ),
     )
     run_p.add_argument(
@@ -183,10 +183,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rec_p.add_argument("--corpus", type=Path, default=None, help="corpus directory (YAML files)")
-    # Record shots default to 1 to match the run default. Multi-shot record
-    # is wasteful given the same uq_diagnoses_incident_prompt_model collapse —
-    # only one shot's response actually drives scoring.
-    rec_p.add_argument("--shots", type=int, default=1, help="shots per case (default: 1)")
+    # Record shots default to 3 to capture the full (case, shot) cassette set
+    # the multi-shot stability path replays: shot 0 via the pipeline, shots 1+
+    # via the in-memory diagnose() call (#49). Each shot is an independent live
+    # Anthropic call → one cassette per (case, shot_index).
+    rec_p.add_argument("--shots", type=int, default=3, help="shots per case (default: 3)")
     rec_p.add_argument(
         "--cassette-dir",
         type=Path,
@@ -223,10 +224,11 @@ def _build_parser() -> argparse.ArgumentParser:
     base_p.add_argument(
         "--shots",
         type=int,
-        default=1,
+        default=3,
         help=(
-            "shots per case (default: 1; see `run --shots` for the multi-shot "
-            "structural limitation tracked in issue #49)"
+            "shots per case (default: 3; shot 0 is the persisted/scored shot, "
+            "shots 1+ measure LLM-call stability — see `run --shots` and "
+            "docs/adr/0009)"
         ),
     )
     base_p.add_argument(
@@ -703,6 +705,11 @@ async def _run_async(
         async with httpx.AsyncClient(transport=transport, base_url="http://eval") as client:
             # Resolve runner dependencies from settings + app.state.
             cassette_transport = getattr(app.state, "cassette_transport", None)
+            # Agent-level deps for the in-memory shots 1+ path (#49). None when
+            # the diagnosis consumer isn't wired — but eval runs require it (see
+            # _check_common_eval_guards), so this is non-None for any --shots>1
+            # run; run_corpus raises loudly if it somehow isn't.
+            diagnosis_deps = getattr(app.state, "diagnosis_deps", None)
 
             # Postgres engine for the truncate-between-cases closure. The
             # lifespan already constructs an engine, but we don't expose it on
@@ -802,6 +809,7 @@ async def _run_async(
                 model_id=settings.anthropic_model,
                 truncate_between_cases=_truncate,
                 webhook_secret=_ensure_secret(webhook_secret),
+                diagnosis_deps=diagnosis_deps,
             )
 
             result: RunResult | None = None
