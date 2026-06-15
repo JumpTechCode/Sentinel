@@ -13,12 +13,24 @@ retrieved from `request.app.state.incident_repo`, matching the `resolve.py` /
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
+from hashlib import sha256
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
+from sentinel.ingestion.fingerprint import fingerprint, normalize_title
+from sentinel.observability.metrics import outbox_events_enqueued_total
 from sentinel.persistence.repositories import IncidentRepository
-from sentinel.schemas.api import IncidentDetailResponse, IncidentListResponse
+from sentinel.schemas.alert import NormalizedAlert
+from sentinel.schemas.api import (
+    CreateIncidentRequest,
+    IncidentDetailResponse,
+    IncidentListResponse,
+    WebhookAcceptedResponse,
+)
 from sentinel.schemas.enums import IncidentStatusType, SeverityType
 
 router = APIRouter(tags=["incidents"])
@@ -66,3 +78,57 @@ async def get_incident(incident_id: UUID, request: Request) -> IncidentDetailRes
     if stored is not None:
         detail = detail.model_copy(update={"context": stored.context})
     return detail
+
+
+@router.post(
+    "/incidents",
+    response_model=None,
+    status_code=201,
+    responses={
+        200: {"model": WebhookAcceptedResponse, "description": "Recurred (deduped)"},
+        201: {"model": WebhookAcceptedResponse, "description": "Created"},
+        422: {"description": "Invalid payload"},
+    },
+)
+async def create_incident(body: CreateIncidentRequest, request: Request) -> JSONResponse:
+    repo: IncidentRepository = request.app.state.incident_repo
+    outbox_topic: str = request.app.state.outbox_topic
+    # Build the canonical alert from the validated request. received_at is set
+    # server-side (manual creation has no wire timestamp).
+    alert = NormalizedAlert(
+        source=body.source,
+        external_id=body.external_id,
+        service=body.service,
+        severity=body.severity,
+        title=body.title,
+        received_at=datetime.now(UTC),
+        raw_payload=body.raw_payload,
+    )
+    # Same fingerprint contract as the webhook path: manual incidents dedup
+    # against webhook incidents within the 1h window.
+    fp = fingerprint(alert.service, normalize_title(alert.title), alert.severity)
+    # Manual creation has no raw HTTP body; hash the canonical JSON payload so
+    # the ingest contract (payload_hash) is satisfied deterministically.
+    payload_hash = sha256(
+        json.dumps(body.raw_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    # No Redis NX idempotency guard here (unlike the webhook path): there is no
+    # raw delivery body to dedup retries on. Fingerprint dedup inside ingest()
+    # is the idempotency mechanism for manual creation.
+    result = await repo.ingest(
+        alert,
+        fingerprint=fp,
+        outbox_topic=outbox_topic,
+        payload_hash=payload_hash,
+    )
+    # Mirror the webhook handler so manual creates are counted in the same
+    # outbox-enqueue throughput metric.
+    outbox_events_enqueued_total.labels(topic=outbox_topic).inc()
+    wire_status = "recurred" if result.event_kind == "recurred" else "accepted"
+    status_code = 200 if result.event_kind == "recurred" else 201
+    return JSONResponse(
+        status_code=status_code,
+        content=WebhookAcceptedResponse(
+            status=wire_status, incident_id=result.incident_id
+        ).model_dump(mode="json"),
+    )

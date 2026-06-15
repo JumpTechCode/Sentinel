@@ -118,3 +118,78 @@ def test_detail_folds_in_enrichment_context() -> None:
     data = resp.json()
     assert data["context"] is not None
     assert data["context"]["incident_id"] == str(incident_id)
+
+
+def _create_body() -> dict[str, object]:
+    return {
+        "source": "generic",
+        "external_id": "manual-1",
+        "service": "checkout",
+        "severity": "SEV2",
+        "title": "manual incident",
+        "raw_payload": {"note": "filed by operator"},
+    }
+
+
+def test_create_returns_201_for_new_incident() -> None:
+    from sentinel.persistence.repositories import IngestResult
+
+    incident_id = uuid4()
+    repo = type("R", (), {})()
+    repo.ingest = AsyncMock(return_value=IngestResult(incident_id=incident_id, event_kind="opened"))
+    client = TestClient(_app(repo))
+    resp = client.post("/incidents", json=_create_body())
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["status"] == "accepted"
+    assert data["incident_id"] == str(incident_id)
+    # Verify it went through the ingest path with a fingerprint + payload_hash.
+    kwargs = repo.ingest.await_args.kwargs
+    assert kwargs["outbox_topic"] == "sentinel.incidents"
+    assert len(kwargs["fingerprint"]) == 64
+    assert len(kwargs["payload_hash"]) == 64
+
+
+def test_create_returns_200_for_recurred() -> None:
+    from sentinel.persistence.repositories import IngestResult
+
+    incident_id = uuid4()
+    repo = type("R", (), {})()
+    repo.ingest = AsyncMock(
+        return_value=IngestResult(incident_id=incident_id, event_kind="recurred")
+    )
+    client = TestClient(_app(repo))
+    resp = client.post("/incidents", json=_create_body())
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "recurred"
+
+
+def test_create_rejects_unknown_field() -> None:
+    repo = type("R", (), {})()
+    repo.ingest = AsyncMock()
+    client = TestClient(_app(repo))
+    body = _create_body() | {"bogus": 1}
+    resp = client.post("/incidents", json=body)
+    assert resp.status_code == 422  # CreateIncidentRequest has extra="forbid"
+
+
+def test_create_increments_outbox_enqueue_metric() -> None:
+    from prometheus_client import REGISTRY
+    from sentinel.persistence.repositories import IngestResult
+
+    def _count() -> float:
+        return (
+            REGISTRY.get_sample_value(
+                "sentinel_outbox_events_enqueued_total", {"topic": "sentinel.incidents"}
+            )
+            or 0.0
+        )
+
+    before = _count()
+    repo = type("R", (), {})()
+    repo.ingest = AsyncMock(return_value=IngestResult(incident_id=uuid4(), event_kind="opened"))
+    client = TestClient(_app(repo))
+    resp = client.post("/incidents", json=_create_body())
+    assert resp.status_code == 201, resp.text
+    # The handler mirrors the webhook path's outbox-enqueue counter.
+    assert _count() - before == 1.0
