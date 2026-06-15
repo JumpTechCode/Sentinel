@@ -95,6 +95,22 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011", "SIM", "S101", "S105", "S106"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's Query/Path/Body/Depends/etc. in argument defaults are the idiomatic
+# pattern, not accidental mutable-default calls. Whitelist them so B008 still
+# catches genuine function-call-in-default bugs everywhere else.
+extend-immutable-calls = [
+  "fastapi.Query",
+  "fastapi.Path",
+  "fastapi.Body",
+  "fastapi.Header",
+  "fastapi.Cookie",
+  "fastapi.Form",
+  "fastapi.File",
+  "fastapi.Depends",
+  "fastapi.Security",
+]
+
 [tool.ruff.format]
 quote-style = "double"
 
