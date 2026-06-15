@@ -8,6 +8,7 @@ consumers; tests and utilities can build their own via `make_async_engine`.
 
 from __future__ import annotations
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -38,3 +39,14 @@ def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession
         expire_on_commit=False,
         autoflush=False,
     )
+
+
+async def check_connection(engine: AsyncEngine) -> None:
+    """Readiness probe: open a connection and run ``SELECT 1``.
+
+    Raises if the database is unreachable. Lives in ``persistence/`` (not the
+    API layer) so raw SQL stays behind the persistence boundary — the `/readyz`
+    handler calls this rather than issuing the query itself.
+    """
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))

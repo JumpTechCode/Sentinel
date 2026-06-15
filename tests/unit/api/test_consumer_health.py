@@ -11,6 +11,8 @@ done-callback can observe them), and `/readyz` reflects per-consumer aliveness.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -22,8 +24,28 @@ from sentinel.api.app import _on_consumer_task_done, _start_then_run
 from sentinel.api.routes.health import router as health_router
 
 
+class _HealthyConn:
+    async def execute(self, *_a: Any, **_k: Any) -> None:
+        return None
+
+
+class _HealthyEngine:
+    """Stub AsyncEngine whose connection succeeds — isolates these tests to the
+    consumer-aliveness behavior while the mandatory pg/redis probes pass."""
+
+    @asynccontextmanager
+    async def connect(self) -> AsyncIterator[_HealthyConn]:
+        yield _HealthyConn()
+
+
 def _app_with_state(consumer_alive: dict[str, bool] | None) -> FastAPI:
     app = FastAPI()
+    # readyz now probes Postgres + Redis unconditionally; give it healthy stubs
+    # so these tests exercise only the consumer-aliveness contract.
+    app.state.engine = _HealthyEngine()
+    redis = type("Rd", (), {})()
+    redis.ping = AsyncMock(return_value=True)
+    app.state.redis = redis
     if consumer_alive is not None:
         app.state.consumer_alive = consumer_alive
     app.include_router(health_router)

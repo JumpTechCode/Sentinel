@@ -16,16 +16,13 @@ def test_healthz_returns_ok() -> None:
     assert body == {"status": "ok"}
 
 
-def test_readyz_reports_dependencies() -> None:
-    """`/readyz` returns 503/"unknown" until Work Area I wires real dependency checks.
-
-    A 200 with empty checks would let a readiness gate route traffic to an unverified pod;
-    the conservative default protects rollouts.
-    """
+def test_readyz_503_without_lifespan() -> None:
+    """Bare build_app() has no engine/redis on state -> probes fail -> 503."""
     app = build_app()
     client = TestClient(app)
     resp = client.get("/readyz")
     assert resp.status_code == 503
     body = resp.json()
-    assert body["status"] == "unknown"
-    assert isinstance(body["checks"], dict)
+    assert body["status"] == "degraded"
+    assert body["checks"]["postgres"] == "dead"
+    assert body["checks"]["redis"] == "dead"
