@@ -2,13 +2,12 @@
 """Incident read/create routes.
 
 `GET /incidents`        — filtered, paginated list.
-`GET /incidents/{id}`   — detail incl. enrichment context (added in a later task).
-`POST /incidents`       — manual create (added in a later task).
+`GET /incidents/{id}`   — detail incl. enrichment context (diagnoses land in PR 2).
+`POST /incidents`       — manual create through the fingerprint + ingest path.
 
 All handlers are thin: querying lives in `IncidentRepository`. The repo is
 retrieved from `request.app.state.incident_repo`, matching the `resolve.py` /
-`webhooks.py` dependency pattern. The lifespan stash of `incident_repo` and the
-`include_router` registration land together in the app-wiring task (T8).
+`webhooks.py` dependency pattern.
 """
 
 from __future__ import annotations
