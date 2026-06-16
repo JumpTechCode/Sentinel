@@ -20,6 +20,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
+from sentinel.diagnosis.persisted import to_view
 from sentinel.ingestion.fingerprint import fingerprint, normalize_title
 from sentinel.observability.metrics import outbox_events_enqueued_total
 from sentinel.persistence.repositories import IncidentRepository
@@ -76,6 +77,14 @@ async def get_incident(incident_id: UUID, request: Request) -> IncidentDetailRes
     stored = await repo.get_enrichment_context(incident_id)
     if stored is not None:
         detail = detail.model_copy(update={"context": stored.context})
+    # Latest diagnosis (0 or 1) rendered via the relaxed view model.
+    # diagnosis_repo is wired unconditionally in the production lifespan; the
+    # getattr guard tolerates minimal test apps that omit it (→ "no diagnoses").
+    diag_repo = getattr(request.app.state, "diagnosis_repo", None)
+    if diag_repo is not None:
+        persisted = await diag_repo.get_by_incident_id(incident_id)
+        if persisted is not None:
+            detail = detail.model_copy(update={"diagnoses": [to_view(persisted)]})
     return detail
 
 

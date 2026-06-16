@@ -193,3 +193,72 @@ def test_create_increments_outbox_enqueue_metric() -> None:
     assert resp.status_code == 201, resp.text
     # The handler mirrors the webhook path's outbox-enqueue counter.
     assert _count() - before == 1.0
+
+
+def test_detail_includes_latest_diagnosis() -> None:
+    from decimal import Decimal
+
+    from sentinel.diagnosis.persisted import PersistedDiagnosis
+    from sentinel.schemas.diagnosis import EvidenceRef
+
+    incident_id = uuid4()
+    pd = PersistedDiagnosis(
+        hypothesis="pool exhausted",
+        confidence=Decimal("0.82"),
+        reasoning="saturated after deploy",
+        evidence=[EvidenceRef(kind="deploy", id="deploy:abc", note="10m before")],
+        suggested_actions=[],
+        likely_category="deploy",
+        hallucinated_evidence=False,
+        model="claude-sonnet-4-5",
+        prompt_version="v1",
+        latency_ms=10,
+        token_usage={},
+    )
+    repo = type("R", (), {})()
+    repo.get = AsyncMock(return_value=_detail(incident_id))
+    repo.get_enrichment_context = AsyncMock(return_value=None)
+    diag_repo = type("D", (), {})()
+    diag_repo.get_by_incident_id = AsyncMock(return_value=pd)
+
+    app = FastAPI()
+    app.state.incident_repo = repo
+    app.state.diagnosis_repo = diag_repo
+    app.include_router(incidents_router)
+    resp = TestClient(app).get(f"/incidents/{incident_id}")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert len(data["diagnoses"]) == 1
+    assert data["diagnoses"][0]["hypothesis"] == "pool exhausted"
+    assert data["diagnoses"][0]["hallucinated_evidence"] is False
+    # Internal metrics are intentionally not part of the diagnosis read shape.
+    assert "token_usage" not in data["diagnoses"][0]
+    assert "latency_ms" not in data["diagnoses"][0]
+
+
+def test_detail_empty_diagnoses_when_none() -> None:
+    incident_id = uuid4()
+    repo = type("R", (), {})()
+    repo.get = AsyncMock(return_value=_detail(incident_id))
+    repo.get_enrichment_context = AsyncMock(return_value=None)
+    diag_repo = type("D", (), {})()
+    diag_repo.get_by_incident_id = AsyncMock(return_value=None)
+
+    app = FastAPI()
+    app.state.incident_repo = repo
+    app.state.diagnosis_repo = diag_repo
+    app.include_router(incidents_router)
+    resp = TestClient(app).get(f"/incidents/{incident_id}")
+    assert resp.status_code == 200
+    assert resp.json()["diagnoses"] == []
+
+
+def test_detail_tolerates_missing_diagnosis_repo() -> None:
+    # PR 1's _app(repo) helper sets only incident_repo; the handler must not 500.
+    incident_id = uuid4()
+    repo = type("R", (), {})()
+    repo.get = AsyncMock(return_value=_detail(incident_id))
+    repo.get_enrichment_context = AsyncMock(return_value=None)
+    resp = TestClient(_app(repo)).get(f"/incidents/{incident_id}")
+    assert resp.status_code == 200
+    assert resp.json()["diagnoses"] == []
