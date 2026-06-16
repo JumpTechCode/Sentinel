@@ -8,6 +8,7 @@ from sentinel.schemas.alert import NormalizedAlert
 from sentinel.schemas.api import (
     CreateIncidentRequest,
     DiagnoseResponse,
+    DiagnosisView,
     EvalRunSummary,
     HealthResponse,
     IncidentDetailResponse,
@@ -59,6 +60,7 @@ __all__ = [
     "DeployItem",
     "DiagnoseResponse",
     "Diagnosis",
+    "DiagnosisView",
     "EvalRunSummary",
     "EvidenceKindType",
     "EvidenceRef",

@@ -14,7 +14,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from sentinel.schemas.context import IncidentContext
-from sentinel.schemas.diagnosis import Diagnosis
+from sentinel.schemas.diagnosis import Diagnosis, EvidenceRef, SuggestedAction
 from sentinel.schemas.enums import (
     CategoryType,
     IncidentStatusType,
@@ -76,6 +76,31 @@ class IncidentListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class DiagnosisView(BaseModel):
+    """Read model for a PERSISTED diagnosis on API responses.
+
+    Mirrors `Diagnosis`'s constraints and relaxes ONLY `evidence` to allow an
+    empty list: a fully-hallucinated diagnosis is stored with verified-evidence
+    `[]` and `hallucinated_evidence=True`, which the strict wire `Diagnosis`
+    (evidence min_length=1) cannot represent. `hypothesis`/`reasoning`/
+    `confidence` keep their bounds — persisted records never violate them, so
+    the constraints surface data corruption early rather than passing it through.
+    `latency_ms`/`token_usage` are intentionally omitted: they are internal
+    metrics exposed via `/metrics`, not part of the diagnosis read shape.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    hypothesis: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reasoning: str = Field(min_length=1)
+    evidence: list[EvidenceRef]
+    suggested_actions: list[SuggestedAction]
+    likely_category: CategoryType
+    hallucinated_evidence: bool
+    model: str
+    prompt_version: str
 
 
 class IncidentDetailResponse(BaseModel):

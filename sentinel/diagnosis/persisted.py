@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sentinel.schemas.api import DiagnosisView
 
 from sentinel.schemas.diagnosis import EvidenceRef, SuggestedAction
 from sentinel.schemas.enums import CategoryType
@@ -30,3 +33,24 @@ class PersistedDiagnosis:
     prompt_version: str
     latency_ms: int
     token_usage: dict[str, Any]
+
+
+def to_view(record: PersistedDiagnosis) -> DiagnosisView:
+    """Convert a persisted diagnosis into the relaxed API read model.
+
+    Local import keeps `persisted.py` free of an API-schema import at module
+    load (mirrors the local-import style in the repository layer).
+    """
+    from sentinel.schemas.api import DiagnosisView
+
+    return DiagnosisView(
+        hypothesis=record.hypothesis,
+        confidence=float(record.confidence),
+        reasoning=record.reasoning,
+        evidence=record.evidence,
+        suggested_actions=record.suggested_actions,
+        likely_category=record.likely_category,
+        hallucinated_evidence=record.hallucinated_evidence,
+        model=record.model,
+        prompt_version=record.prompt_version,
+    )
