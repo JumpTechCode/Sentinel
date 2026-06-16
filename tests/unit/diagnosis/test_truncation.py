@@ -1,8 +1,10 @@
 # tests/unit/diagnosis/test_truncation.py
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sentinel.diagnosis.truncation import truncate_for_budget
 
 from tests.unit.diagnosis.fakes import (
@@ -58,6 +60,38 @@ def test_deploys_section_always_keeps_newest() -> None:
     out, _ = truncate_for_budget(ctx, max_input_tokens=200)
     deploy_ids = [d.id for d in out.recent_deploys.data]
     assert "deploy:new" in deploy_ids
+
+
+def test_whole_blob_serialized_at_most_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Truncation must not re-serialize the entire context once per dropped item
+    (issue #70 — that was O(n^2)). Assert the full blob is dumped at most once,
+    regardless of how many items get dropped. Item-sized dumps are fine."""
+    ctx = make_context(
+        deploys=[make_deploy()],
+        logs=[make_log(i) for i in range(120)],
+        runbooks=[make_runbook(), make_runbook()],
+        similar=[make_similar(), make_similar()],
+    )
+    real_dumps = json.dumps
+    blob_dumps = 0
+
+    def counting_dumps(obj: object) -> str:
+        nonlocal blob_dumps
+        # The whole-context blob is the dict carrying the section keys. Require two
+        # distinct sections so a future rename of one can't silently turn this
+        # discriminator into a no-op (which would pass <= 1 as a false green).
+        if isinstance(obj, dict) and "recent_logs" in obj and "recent_deploys" in obj:
+            blob_dumps += 1
+        return real_dumps(obj)
+
+    # truncate_for_budget calls json.dumps with a single positional arg, so a
+    # one-arg wrapper covers every call made during the patched window.
+    monkeypatch.setattr(json, "dumps", counting_dumps)
+    out, stats = truncate_for_budget(ctx, max_input_tokens=500)
+
+    assert stats.dropped.get("recent_logs", 0) > 50  # genuinely dropped many
+    assert len(out.recent_logs.data) >= 1
+    assert blob_dumps <= 1, f"whole blob serialized {blob_dumps}x (expected <=1)"
 
 
 def test_stats_to_dict_carries_per_section_counts() -> None:
