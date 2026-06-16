@@ -10,6 +10,7 @@ from sentinel.schemas.api import (
     CreateIncidentRequest,
     DiagnoseResponse,
     DiagnosisView,
+    EvalRunDetail,
     EvalRunSummary,
     HealthResponse,
     IncidentDetailResponse,
@@ -268,3 +269,31 @@ def test_diagnose_response_carries_view_and_persisted_status() -> None:
     resp = DiagnoseResponse(incident_id=uuid4(), diagnosis=view, persisted="new")
     assert resp.persisted == "new"
     assert resp.diagnosis.confidence == 0.82
+
+
+def test_eval_run_detail_round_trips() -> None:
+    d = EvalRunDetail(
+        id=uuid4(),
+        status="ok",
+        trigger="baseline",
+        git_sha="abc123",
+        model="claude-sonnet-4-5",
+        prompt_version="v1",
+        embedding_model_id="BAAI/bge-large-en-v1.5",
+        corpus_version="1",
+        corpus_size=10,
+        shots_per_case=1,
+        started_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 6, 15, 12, 2, tzinfo=UTC),
+        metrics={"category_match": 0.9},
+        metrics_stability={"category_match": 0.0},
+        regression_passed=True,
+        regression_baseline_sha="def456",
+        regression_detail={"category_match": {"delta": 0.0}},
+    )
+    dumped = d.model_dump(mode="json")
+    assert dumped["status"] == "ok"
+    assert dumped["metrics"]["category_match"] == 0.9
+    assert dumped["regression_passed"] is True
+    # Round-trips back through validation unchanged (datetime/UUID re-parse).
+    assert EvalRunDetail.model_validate(dumped) == d

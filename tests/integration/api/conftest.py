@@ -85,7 +85,11 @@ async def _reset_state(pg_dsn: str, redis_url: str) -> None:
     engine = create_async_engine(pg_dsn)
     try:
         async with engine.begin() as conn:
-            await conn.execute(text("TRUNCATE incidents, diagnoses, outbox_events CASCADE"))
+            await conn.execute(
+                text(
+                    "TRUNCATE incidents, diagnoses, outbox_events, eval_runs, eval_case_results CASCADE"
+                )
+            )
     finally:
         await engine.dispose()
 
