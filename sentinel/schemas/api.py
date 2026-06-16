@@ -14,7 +14,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from sentinel.schemas.context import IncidentContext
-from sentinel.schemas.diagnosis import Diagnosis, EvidenceRef, SuggestedAction
+from sentinel.schemas.diagnosis import EvidenceRef, SuggestedAction
 from sentinel.schemas.enums import (
     CategoryType,
     IncidentStatusType,
@@ -116,14 +116,20 @@ class IncidentDetailResponse(BaseModel):
     opened_at: datetime
     resolved_at: datetime | None = None
     context: IncidentContext | None = None
-    diagnoses: list[Diagnosis] = Field(default_factory=list)
+    diagnoses: list[DiagnosisView] = Field(default_factory=list)
 
 
 class DiagnoseResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
     incident_id: UUID
-    diagnosis: Diagnosis
-    hallucinated_evidence: bool
+    diagnosis: DiagnosisView
+    persisted: Literal["new", "duplicate"] = Field(
+        description=(
+            "Dedup outcome of the underlying save: 'new' = a diagnosis row was "
+            "written; 'duplicate' = an identical (incident, prompt, model) "
+            "diagnosis already existed and was returned unchanged."
+        )
+    )
 
 
 # --- Eval runs -------------------------------------------------------------- #

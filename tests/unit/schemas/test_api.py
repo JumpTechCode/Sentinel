@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from sentinel.schemas.api import (
     CreateIncidentRequest,
     DiagnoseResponse,
+    DiagnosisView,
     EvalRunSummary,
     HealthResponse,
     IncidentDetailResponse,
@@ -105,32 +106,52 @@ def _valid_diagnosis() -> Diagnosis:
     )
 
 
+def _valid_diagnosis_view(*, hallucinated_evidence: bool = False) -> DiagnosisView:
+    return DiagnosisView(
+        hypothesis="bad deploy abc123 broke checkout",
+        confidence=0.78,
+        reasoning="recent deploy at 06:25 immediately preceded errors",
+        evidence=[EvidenceRef(kind="deploy", id="deploy:abc123", note="deploy at fault")],
+        suggested_actions=[
+            SuggestedAction(
+                description="Roll back deploy",
+                risk="medium",
+                rationale="recent change suspected",
+            )
+        ],
+        likely_category="deploy",
+        hallucinated_evidence=hallucinated_evidence,
+        model="claude-sonnet-4-5",
+        prompt_version="v1",
+    )
+
+
 # --- DiagnoseResponse ------------------------------------------------------- #
 
 
 def test_diagnose_response_hallucinated_false() -> None:
     resp = DiagnoseResponse(
         incident_id=uuid4(),
-        diagnosis=_valid_diagnosis(),
-        hallucinated_evidence=False,
+        diagnosis=_valid_diagnosis_view(hallucinated_evidence=False),
+        persisted="new",
     )
-    assert resp.hallucinated_evidence is False
+    assert resp.diagnosis.hallucinated_evidence is False
 
 
 def test_diagnose_response_hallucinated_true() -> None:
     resp = DiagnoseResponse(
         incident_id=uuid4(),
-        diagnosis=_valid_diagnosis(),
-        hallucinated_evidence=True,
+        diagnosis=_valid_diagnosis_view(hallucinated_evidence=True),
+        persisted="duplicate",
     )
-    assert resp.hallucinated_evidence is True
+    assert resp.diagnosis.hallucinated_evidence is True
 
 
 def test_diagnose_response_round_trip() -> None:
     resp = DiagnoseResponse(
         incident_id=uuid4(),
-        diagnosis=_valid_diagnosis(),
-        hallucinated_evidence=False,
+        diagnosis=_valid_diagnosis_view(),
+        persisted="new",
     )
     assert DiagnoseResponse.model_validate_json(resp.model_dump_json()) == resp
 
@@ -203,3 +224,47 @@ def test_incident_list_response_round_trips() -> None:
     assert dumped["limit"] == 50
     assert dumped["offset"] == 0
     assert len(dumped["items"]) == 1
+
+
+def test_incident_detail_diagnoses_uses_view_and_allows_empty_evidence() -> None:
+    view = DiagnosisView(
+        hypothesis="h",
+        confidence=0.4,
+        reasoning="r",
+        evidence=[],  # empty — only DiagnosisView permits this
+        suggested_actions=[],
+        likely_category="deploy",
+        hallucinated_evidence=True,
+        model="claude-sonnet-4-5",
+        prompt_version="v1",
+    )
+    detail = IncidentDetailResponse(
+        id=uuid4(),
+        source="sentry",
+        external_id="e",
+        service="s",
+        severity="SEV1",
+        status="diagnosing",
+        title="t",
+        fingerprint="f" * 64,
+        opened_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
+        diagnoses=[view],
+    )
+    assert detail.diagnoses[0].hallucinated_evidence is True
+
+
+def test_diagnose_response_carries_view_and_persisted_status() -> None:
+    view = DiagnosisView(
+        hypothesis="h",
+        confidence=0.82,
+        reasoning="r",
+        evidence=[],
+        suggested_actions=[],
+        likely_category="deploy",
+        hallucinated_evidence=False,
+        model="m",
+        prompt_version="v1",
+    )
+    resp = DiagnoseResponse(incident_id=uuid4(), diagnosis=view, persisted="new")
+    assert resp.persisted == "new"
+    assert resp.diagnosis.confidence == 0.82
