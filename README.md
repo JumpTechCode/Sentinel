@@ -135,7 +135,7 @@ sentinel/
 ├── persistence/    SQLAlchemy models, Alembic migrations, repositories
 ├── observability/  Prometheus metrics, OTel tracing, structlog, LLM audit log + cost meter
 ├── schemas/        Pydantic v2 contracts shared across modules (NormalizedAlert, Diagnosis, …)
-├── api/            FastAPI app (routes/health, routes/webhooks)
+├── api/            FastAPI app — routes: health, webhooks, incidents, resolve, diagnose, evals, metrics
 ├── evals/          eval harness: postmortem corpus, scoring, multi-shot stability, CI gate
 └── config/         pydantic-settings, per-env defaults, secret loading
 ```
