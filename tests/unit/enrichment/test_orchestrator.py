@@ -85,6 +85,33 @@ async def test_assemble_returns_incident_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_assemble_emits_a_span_per_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each fetcher run is wrapped in a tracing span.
+
+    gh#64: `span_for_fetcher` existed but had zero call sites, so enrichment
+    emitted no spans. Inject an in-memory exporter (the SDK forbids overriding a
+    set provider, so patch the tracer helper) and assert one span per fetcher.
+    """
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        "sentinel.observability.tracing._tracer",
+        lambda: provider.get_tracer("sentinel"),
+    )
+
+    deps = _make_deps(_six_ok())
+    await assemble(_make_incident(), deps)
+
+    names = {s.name for s in exporter.get_finished_spans()}
+    assert {f"fetcher.{n}" for n in ("deploys", "related_alerts", "runbooks")} <= names
+
+
+@pytest.mark.asyncio
 async def test_raising_fetcher_becomes_failed_result() -> None:
     incident = _make_incident()
 

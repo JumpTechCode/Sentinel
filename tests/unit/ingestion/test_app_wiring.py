@@ -30,6 +30,7 @@ async def test_lifespan_starts_and_stops_producer_and_drainer(
         patch("sentinel.api.app.FastEmbedProvider") as MockEmbedProvider,
         patch("sentinel.api.app.PromptBundle") as MockPromptBundle,
         patch("sentinel.api.app._refresh_outbox_gauges") as MockGauges,
+        patch("sentinel.api.app.configure_observability") as MockConfigureObs,
     ):
         prod_instance = MockProducer.return_value
         prod_instance.start = AsyncMock()
@@ -93,6 +94,9 @@ async def test_lifespan_starts_and_stops_producer_and_drainer(
             assert hasattr(app.state, "diagnosis_consumer")
             assert hasattr(app.state, "memory_consumer")
 
+        # gh#64: the lifespan must wire observability (logging + tracing), not
+        # just tracing as it did before.
+        MockConfigureObs.assert_called_once()
         prod_instance.start.assert_awaited_once()
         prod_instance.stop.assert_awaited_once()
         drainer_instance.stop.assert_called_once()

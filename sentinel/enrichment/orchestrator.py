@@ -26,6 +26,7 @@ from sentinel.observability.metrics import (
     enrichment_failures_total,
     enrichment_section_status_total,
 )
+from sentinel.observability.tracing import span_for_fetcher
 from sentinel.schemas.context import FetcherResult, IncidentContext
 
 log = logging.getLogger(__name__)
@@ -66,6 +67,21 @@ def _failed_result(error: str) -> FetcherResult[Any]:
 
 
 async def _run(
+    fetcher: Fetcher,
+    incident: Any,
+    deps: EnrichmentDeps,
+) -> FetcherResult[Any]:
+    """Run one fetcher wrapped in a per-fetcher tracing span.
+
+    The fetch/timeout/breaker/coerce logic lives in `_run_guarded` (which never
+    raises); this wrapper only opens the span so enrichment is actually traced.
+    gh#64: `span_for_fetcher` previously had zero call sites.
+    """
+    with span_for_fetcher(fetcher.name):
+        return await _run_guarded(fetcher, incident, deps)
+
+
+async def _run_guarded(
     fetcher: Fetcher,
     incident: Any,
     deps: EnrichmentDeps,

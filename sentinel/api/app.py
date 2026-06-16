@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import httpx
 from aiokafka import AIOKafkaConsumer
 from fastapi import FastAPI
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from redis.asyncio import Redis
 
 from sentinel import __version__
@@ -54,9 +55,9 @@ from sentinel.memory import (
     MemoryPipeline,
     PgVectorIncidentStore,
 )
+from sentinel.observability import configure_observability
 from sentinel.observability.llm_audit import LLMAuditLogger
 from sentinel.observability.metrics import consumer_crashed_total
-from sentinel.observability.tracing import configure_tracing
 from sentinel.persistence.repositories import (
     OutboxRepository,
     PostgresDeployRepository,
@@ -154,7 +155,7 @@ def _on_consumer_task_done(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = load_settings()
-    configure_tracing(settings)
+    configure_observability(settings)
 
     engine = make_async_engine(settings)
     session_factory = make_session_factory(engine)
@@ -507,6 +508,11 @@ def build_app() -> FastAPI:
         ),
         lifespan=lifespan,
     )
+    # Emit a server span per request. Logging + tracing providers are configured
+    # in the lifespan; this only registers the ASGI middleware. Per-app (not the
+    # global `.instrument()`) and idempotent across repeated build_app() calls —
+    # the test fixtures construct the app many times (gh#64).
+    FastAPIInstrumentor.instrument_app(app)
     app.include_router(health_router)
     app.include_router(webhooks_router)
     app.include_router(resolve_router)
