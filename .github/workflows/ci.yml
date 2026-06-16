@@ -28,6 +28,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      - name: Cache embedding model (test_embeddings downloads BAAI/bge-large-en-v1.5)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.test-model-cache
+          key: fastembed-bge-large-en-v1.5-unit-${{ runner.os }}
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip wheel
@@ -40,6 +46,18 @@ jobs:
 
       - name: Typecheck (mypy --strict)
         run: mypy
+
+      - name: Warm embedding model cache (retry past the intermittent HF/tqdm download flake)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if python -c "from fastembed import TextEmbedding; list(TextEmbedding(model_name='BAAI/bge-large-en-v1.5', cache_dir='${{ github.workspace }}/.test-model-cache').embed(['warmup'])); print('fastembed model ready')"; then
+              exit 0
+            fi
+            echo "fastembed warmup attempt $attempt failed; retrying in 5s"
+            sleep 5
+          done
+          echo "fastembed warmup failed after 5 attempts"
+          exit 1
 
       - name: Unit tests
         run: pytest tests/unit -v
@@ -133,6 +151,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-bge-large-en-v1.5-evals-${{ runner.os }}
+
       - run: |
           python -m pip install --upgrade pip wheel
           pip install -e ".[dev]"
@@ -148,6 +172,25 @@ jobs:
 
       - name: Migrate
         run: make migrate
+
+      - name: Warm embedding model cache
+        # Seed .fastembed-cache so `make evals` never triggers the live HuggingFace
+        # download, whose threaded tqdm cleanup intermittently crashes with
+        # `del tqdm._lock`. Run with tqdm ENABLED here (TQDM_DISABLE=0) — the
+        # job-level TQDM_DISABLE=1 is what trips that cleanup path; the unit job
+        # (tqdm enabled) downloads fine. Retry covers transient HF unavailability.
+        env:
+          TQDM_DISABLE: "0"
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if python -c "from fastembed import TextEmbedding; list(TextEmbedding(model_name='BAAI/bge-large-en-v1.5', cache_dir='${{ github.workspace }}/.fastembed-cache').embed(['warmup'])); print('fastembed model ready')"; then
+              exit 0
+            fi
+            echo "fastembed warmup attempt $attempt failed; retrying in 5s"
+            sleep 5
+          done
+          echo "fastembed warmup failed after 5 attempts"
+          exit 1
 
       - name: Evals gate (cassette replay + regression gate)
         run: |
