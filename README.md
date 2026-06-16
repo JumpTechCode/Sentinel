@@ -105,6 +105,24 @@ Python 3.12 · FastAPI · asyncio · Pydantic v2 · Postgres 16 + `pgvector` · 
         └──────────────────────────────────────────────────────────┘
 ```
 
+## HTTP API
+
+Pydantic-validated request *and* response on every boundary; the OpenAPI schema is publishable (`make openapi`). Shipped (PRs #58 / #59 / #60):
+
+| Method | Path | |
+|--------|------|--|
+| `POST` | `/webhooks/{source}` | ingest — HMAC + payload-hash idempotent; returns `202` |
+| `POST` | `/incidents` | manual create through the fingerprint + ingest path |
+| `GET`  | `/incidents` | list with `status` / `service` / `severity` filters + pagination |
+| `GET`  | `/incidents/{id}` | detail incl. assembled context + latest diagnosis |
+| `POST` | `/incidents/{id}/resolve` | submit resolution (triggers embedding refresh on resolve) |
+| `POST` | `/incidents/{id}/diagnose` | re-run diagnosis — replay-backed, suggest-only |
+| `GET`  | `/evals/runs` · `/evals/runs/{id}` · `/evals/baseline` | eval-run history + current baseline |
+| `GET`  | `/metrics` | Prometheus exposition |
+| `GET`  | `/healthz` · `/readyz` | liveness; readiness (Postgres + Redis probes + consumer aliveness) |
+
+Realtime SSE (`/incidents/{id}/stream`) and WebSocket (`/ws/incidents`) are the remaining slice (Work Area I, PR 3).
+
 ## Module map
 
 ```
@@ -117,14 +135,14 @@ sentinel/
 ├── persistence/    SQLAlchemy models, Alembic migrations, repositories
 ├── observability/  Prometheus metrics, OTel tracing, structlog, LLM audit log + cost meter
 ├── schemas/        Pydantic v2 contracts shared across modules (NormalizedAlert, Diagnosis, …)
-├── api/            FastAPI app (routes/health, routes/webhooks)
+├── api/            FastAPI app — routes: health, webhooks, incidents, resolve, diagnose, evals, metrics
 ├── evals/          eval harness: postmortem corpus, scoring, multi-shot stability, CI gate
 └── config/         pydantic-settings, per-env defaults, secret loading
 ```
 
 ## Project status
 
-Built work area by work area, each behind a green CI gate. The eval harness (K) was prioritized ahead of the remaining API surface (I) and UI (L).
+Built work area by work area, each behind a green CI gate. The eval harness (K) was prioritized ahead of the API surface (I); the REST surface has since landed (PRs #58 / #59 / #60), leaving realtime (SSE/WS) and the UI (L).
 
 | Phase | Work area | Status |
 |------:|-----------|--------|
@@ -134,7 +152,7 @@ Built work area by work area, each behind a green CI gate. The eval harness (K) 
 | 4 | Enrichment pipeline (F) — parallel fetchers, circuit breakers, `incident.enriched` event | ✅ Landed |
 | 5 | Diagnosis agent (G) — versioned prompt, Anthropic call, schema + evidence gate, idempotent persistence | ✅ Landed |
 | 6 | Memory / feedback loop (H) — embedding on resolve, similar-incident retrieval feedback | ✅ Landed |
-| 7 | API surface (I) — REST + SSE/WS, `/readyz` dependency checks, OpenAPI publish | ⏳ Planned |
+| 7 | API surface (I) — REST (incidents CRUD/list/detail, re-diagnose, `/metrics`, `/readyz` PG+Redis probes, evals reads), publishable OpenAPI ✅ landed; realtime SSE/WS ⏳ | 🔄 REST landed |
 | 8 | Eval harness (K) — postmortem corpus, scoring, multi-shot stability, CI gate + nightly full | ✅ Landed |
 | 9 | UI (L) — Next.js incident view | ⏳ Planned |
 | 10 | Load + chaos (M) — Locust ingestion load, Toxiproxy Redis-outage + in-process breaker fault injection | ✅ Landed |
@@ -190,7 +208,7 @@ make readme-numbers            # patch README from the latest eval run
 make load-smoke                # concurrent-ingestion invariants (zero-drop + p95); needs docker
 make load                      # locust 100 req/s x 5min, consumers-off stack (creditless)
 make chaos                     # resilience: breaker fault-injection + toxiproxy Redis outage
-make openapi                   # export OpenAPI JSON     (placeholder until Work Area I)
+make openapi                   # export the publishable OpenAPI schema to openapi.json
 ```
 
 `make load` and `make chaos` never call the Anthropic API: load runs the stack
