@@ -309,3 +309,29 @@ async def test_no_tool_call_raises_llm_no_tool_call() -> None:
             tool_schema=_TOOL_SCHEMA,
             tool_name=_TOOL_NAME,
         )
+
+
+async def test_diagnose_call_emits_llm_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The LLM call is wrapped in a tracing span (gh#64 — span_for_llm was unused)."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        "sentinel.observability.tracing._tracer",
+        lambda: provider.get_tracer("sentinel"),
+    )
+
+    client = _make_client(stream_result=_FakeStream(_make_fake_message()))
+    await client.diagnose_call(
+        system="sys",
+        user="user",
+        tool_schema=_TOOL_SCHEMA,
+        tool_name=_TOOL_NAME,
+    )
+
+    names = {s.name for s in exporter.get_finished_spans()}
+    assert "llm.claude-sonnet-4-5" in names
