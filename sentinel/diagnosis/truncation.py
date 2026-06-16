@@ -26,6 +26,10 @@ from sentinel.schemas.context import IncidentContext
 
 _SAFETY_MARGIN = 0.10
 _CHARS_PER_TOKEN = 4
+# Default json.dumps separator between list items (separators=(", ", ": ")).
+# Popping the last element of a list removes exactly this separator plus the
+# element's own serialization — the basis for the O(n) running-total below.
+_ITEM_SEP = ", "
 
 _DROP_ORDER: tuple[str, ...] = (
     "recent_logs",
@@ -49,7 +53,11 @@ class TruncationStats:
 
 
 def _estimate_tokens(blob_json: str) -> int:
-    return int(len(blob_json) / _CHARS_PER_TOKEN * (1 + _SAFETY_MARGIN))
+    return _estimate_tokens_for_chars(len(blob_json))
+
+
+def _estimate_tokens_for_chars(n_chars: int) -> int:
+    return int(n_chars / _CHARS_PER_TOKEN * (1 + _SAFETY_MARGIN))
 
 
 def truncate_for_budget(
@@ -71,6 +79,12 @@ def truncate_for_budget(
     blob: dict[str, Any] = json.loads(raw_json)
     _sort_sections_in_place(ctx, blob)
 
+    # Track the serialized length with a running total rather than re-dumping the
+    # whole blob on every pop (issue #70: that re-serialization was O(n^2) on
+    # exactly the large-context case truncation exists for). Popping the last
+    # element of a JSON list removes its leading ", " separator plus its own
+    # serialization, so the total stays byte-exact against json.dumps(blob).
+    current_chars = len(json.dumps(blob))
     dropped: dict[str, int] = {}
     while True:
         progress = False
@@ -78,11 +92,11 @@ def truncate_for_budget(
             items: list[Any] = blob[section]["data"]
             if len(items) <= 1:
                 continue
-            items.pop()
+            popped = items.pop()
             dropped[section] = dropped.get(section, 0) + 1
             progress = True
-            current_json = json.dumps(blob)
-            if _estimate_tokens(current_json) <= max_input_tokens:
+            current_chars -= len(_ITEM_SEP) + len(json.dumps(popped))
+            if _estimate_tokens_for_chars(current_chars) <= max_input_tokens:
                 return IncidentContext.model_validate(blob), TruncationStats(dropped=dropped)
         if not progress:
             # Every section is already at ≤1 item; nothing left to drop.
