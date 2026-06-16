@@ -68,6 +68,14 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["sentinel*"]
 
+[tool.setuptools.package-data]
+# The non-editable wheel (the Docker image) must ship the versioned diagnosis
+# prompt + its integrity baseline; setuptools includes only *.py by default, so
+# without this the image crashes at PromptBundle.load. The eval corpus/cassettes
+# are deliberately NOT packaged — they are dev/CI-only and run from the source
+# tree, never from the installed wheel.
+"sentinel.diagnosis" = ["prompts/*.md", "prompts/*.sha256"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
