@@ -76,9 +76,6 @@ async def get_incident(incident_id: UUID, request: Request) -> IncidentDetailRes
     if detail is None:
         raise HTTPException(status_code=404, detail="incident_not_found")
     # Enrichment context is stored separately (JSONB read-back); fold it in.
-    # Diagnoses are deferred to PR 2 — the wire `Diagnosis` model requires
-    # evidence min_length=1, which a fully-hallucinated PersistedDiagnosis
-    # cannot satisfy. PR 2 introduces the relaxed view model.
     stored = await repo.get_enrichment_context(incident_id)
     if stored is not None:
         detail = detail.model_copy(update={"context": stored.context})
