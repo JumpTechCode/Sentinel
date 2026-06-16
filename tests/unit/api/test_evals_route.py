@@ -67,3 +67,30 @@ def test_list_runs_rejects_bad_limit() -> None:
     client = TestClient(_app(repo))
     assert client.get("/evals/runs?limit=0").status_code == 422  # below ge=1
     assert client.get("/evals/runs?limit=201").status_code == 422  # above le=200
+
+
+def test_get_run_returns_detail() -> None:
+    rec = _record()
+    repo = type("R", (), {})()
+    repo.get_run = AsyncMock(return_value=rec)
+    client = TestClient(_app(repo))
+    resp = client.get(f"/evals/runs/{rec.id}")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["id"] == str(rec.id)
+    assert data["status"] == "ok"
+    assert data["metrics"]["category_match"] == 0.9
+    assert data["regression_passed"] is True
+    # _detail-only fields (absent from EvalRunSummary) — guards against a wrong-mapper swap.
+    assert data["trigger"] == "baseline"
+    assert data["git_sha"] == "abc123"
+    repo.get_run.assert_awaited_once_with(rec.id)
+
+
+def test_get_run_404_when_missing() -> None:
+    repo = type("R", (), {})()
+    repo.get_run = AsyncMock(return_value=None)
+    client = TestClient(_app(repo))
+    resp = client.get(f"/evals/runs/{uuid4()}")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "eval_run_not_found"

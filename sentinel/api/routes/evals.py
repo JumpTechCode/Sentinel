@@ -8,7 +8,9 @@ API operation — see docs/adr/0014-defer-eval-run-trigger-endpoint.md.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, Request
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from sentinel.persistence.repositories import EvalRunRecord, EvalRunRepository
 from sentinel.schemas.api import EvalRunDetail, EvalRunSummary
@@ -58,3 +60,16 @@ async def list_eval_runs(
     repo: EvalRunRepository = request.app.state.eval_run_repo
     records = await repo.list_recent(limit=limit)
     return [_summary(r) for r in records]
+
+
+@router.get(
+    "/evals/runs/{run_id}",
+    response_model=EvalRunDetail,
+    responses={404: {"description": "Eval run not found"}},
+)
+async def get_eval_run(run_id: UUID, request: Request) -> EvalRunDetail:
+    repo: EvalRunRepository = request.app.state.eval_run_repo
+    record = await repo.get_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="eval_run_not_found")
+    return _detail(record)
