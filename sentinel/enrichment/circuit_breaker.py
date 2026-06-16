@@ -47,6 +47,9 @@ class CircuitBreaker:
         self._state: State = "closed"
         self._opened_at: float | None = None
         self._lock = asyncio.Lock()
+        # True while a single half-open trial is in flight; gates concurrent
+        # callers so only one probes the unhealthy dependency (see `call`).
+        self._half_open_in_flight = False
 
     @property
     def name(self) -> str:
@@ -75,6 +78,7 @@ class CircuitBreaker:
             self._failures.popleft()
 
     async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
+        probing = False
         async with self._lock:
             now = self._time()
             if self._state == "open":
@@ -85,12 +89,29 @@ class CircuitBreaker:
                     self._transition("half_open")
                 else:
                     raise CircuitOpenError(f"breaker {self._name} open")
+            if self._state == "half_open":
+                # Single-flight the trial: only the first post-cooldown caller
+                # probes the unhealthy dependency. Concurrent callers short-circuit
+                # until that probe closes or re-opens the breaker, instead of all
+                # hammering the dependency at once.
+                if self._half_open_in_flight:
+                    raise CircuitOpenError(f"breaker {self._name} half-open probe in flight")
+                self._half_open_in_flight = True
+                probing = True
         try:
             result = await fn()
         except asyncio.CancelledError:
+            # Release the probe slot without counting a failure. A bare assignment
+            # has no await point, so it is race-free even off-lock — important here
+            # because acquiring the lock during cancellation could itself be
+            # cancelled and leak the slot, wedging the breaker half-open forever.
+            if probing:
+                self._half_open_in_flight = False
             raise
         except BaseException:
             async with self._lock:
+                if probing:
+                    self._half_open_in_flight = False
                 now2 = self._time()
                 if self._state == "half_open":
                     self._failures.append(now2)
@@ -103,6 +124,8 @@ class CircuitBreaker:
             raise
         else:
             async with self._lock:
+                if probing:
+                    self._half_open_in_flight = False
                 if self._state == "half_open":
                     self._transition("closed")
             return result
