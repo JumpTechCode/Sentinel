@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 from pydantic import SecretStr, ValidationError
@@ -47,6 +49,28 @@ def test_env_overrides_yaml_default(monkeypatch: MonkeyPatch) -> None:
 
     settings = Settings()
     assert settings.log_level == "WARNING"
+
+
+def test_config_dir_env_override(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """SENTINEL_CONFIG_DIR relocates the per-env YAML lookup.
+
+    Required for non-editable installs (the Docker image): the package lives in
+    site-packages, so the `__file__`-relative default resolves to
+    `site-packages/config/` instead of the COPY'd `/app/config`. An explicit
+    config dir lets the image point the loader at the real location.
+    """
+    (tmp_path / "dev.yaml").write_text("kafka_topic_incidents: custom.topic.from.configdir\n")
+    monkeypatch.setenv("SENTINEL_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SENTINEL_ENV", "dev")
+    monkeypatch.setenv("SENTINEL_POSTGRES_DSN", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("SENTINEL_REDIS_URL", "redis://h:6379/0")
+    monkeypatch.setenv("SENTINEL_KAFKA_BROKERS", "kafka:9092")
+    monkeypatch.setenv("SENTINEL_ANTHROPIC_API_KEY", "sk-test")
+    # No env var should shadow the YAML value under test.
+    monkeypatch.delenv("SENTINEL_KAFKA_TOPIC_INCIDENTS", raising=False)
+
+    settings = Settings()
+    assert settings.kafka_topic_incidents == "custom.topic.from.configdir"
 
 
 def test_settings_missing_required_field_raises(monkeypatch: MonkeyPatch) -> None:

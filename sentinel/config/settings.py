@@ -26,7 +26,14 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
 
     def __init__(self, settings_cls: type[BaseSettings], env_name: str) -> None:
         super().__init__(settings_cls)
-        path = Path(__file__).resolve().parents[2] / "config" / f"{env_name}.yaml"
+        # Resolve the config directory. SENTINEL_CONFIG_DIR lets a deployment point
+        # at an explicit location; it is required once the package is installed
+        # non-editable (e.g. the Docker image), where `__file__` lives under
+        # site-packages and the `parents[2]`-relative path would miss the COPY'd
+        # `config/` tree. Defaults to the in-tree `config/` for local/dev/test.
+        config_dir = os.environ.get("SENTINEL_CONFIG_DIR")
+        base = Path(config_dir) if config_dir else Path(__file__).resolve().parents[2] / "config"
+        path = base / f"{env_name}.yaml"
         if path.exists():
             data = yaml.safe_load(path.read_text()) or {}
             if not isinstance(data, dict):
