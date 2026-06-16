@@ -146,6 +146,33 @@ class EvalRunSummary(BaseModel):
     summary: dict[str, float] | None  # aggregated scorer outputs
 
 
+class EvalRunDetail(BaseModel):
+    """Full eval-run record for the detail + baseline endpoints.
+
+    `regression_detail` is an intentionally opaque object (its keys vary by
+    regression check), the same documented exception as `raw_payload`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    id: UUID
+    status: Literal["running", "ok", "failed", "partial"]
+    trigger: Literal["local", "ci-smoke", "ci-nightly", "baseline", "manual"]
+    git_sha: str
+    model: str
+    prompt_version: str
+    embedding_model_id: str
+    corpus_version: str
+    corpus_size: int
+    shots_per_case: int
+    started_at: datetime
+    completed_at: datetime | None
+    metrics: dict[str, float]
+    metrics_stability: dict[str, float]
+    regression_passed: bool | None
+    regression_baseline_sha: str | None
+    regression_detail: dict[str, Any] | None
+
+
 # --- Health ----------------------------------------------------------------- #
 
 
