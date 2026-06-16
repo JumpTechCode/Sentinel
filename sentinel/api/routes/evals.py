@@ -73,3 +73,16 @@ async def get_eval_run(run_id: UUID, request: Request) -> EvalRunDetail:
     if record is None:
         raise HTTPException(status_code=404, detail="eval_run_not_found")
     return _detail(record)
+
+
+@router.get(
+    "/evals/baseline",
+    response_model=EvalRunDetail,
+    responses={404: {"description": "No baseline run recorded"}},
+)
+async def get_eval_baseline(request: Request) -> EvalRunDetail:
+    repo: EvalRunRepository = request.app.state.eval_run_repo
+    record = await repo.get_latest_ok_run(trigger="baseline")
+    if record is None:
+        raise HTTPException(status_code=404, detail="no_baseline")
+    return _detail(record)

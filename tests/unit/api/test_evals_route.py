@@ -94,3 +94,23 @@ def test_get_run_404_when_missing() -> None:
     resp = client.get(f"/evals/runs/{uuid4()}")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "eval_run_not_found"
+
+
+def test_baseline_returns_detail() -> None:
+    rec = _record(trigger="baseline")
+    repo = type("R", (), {})()
+    repo.get_latest_ok_run = AsyncMock(return_value=rec)
+    client = TestClient(_app(repo))
+    resp = client.get("/evals/baseline")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["trigger"] == "baseline"
+    repo.get_latest_ok_run.assert_awaited_once_with(trigger="baseline")
+
+
+def test_baseline_404_when_none() -> None:
+    repo = type("R", (), {})()
+    repo.get_latest_ok_run = AsyncMock(return_value=None)
+    client = TestClient(_app(repo))
+    resp = client.get("/evals/baseline")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "no_baseline"
