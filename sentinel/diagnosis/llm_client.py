@@ -19,6 +19,7 @@ from anthropic.types import MessageParam, ToolParam
 from pydantic import SecretStr
 
 from sentinel.diagnosis.errors import LLMNoToolCall, LLMTimeout, LLMTransport
+from sentinel.observability.tracing import span_for_llm
 
 _BACKOFF_S = 0.5
 
@@ -82,19 +83,22 @@ class AnthropicClient:
         tool_name: str,
         repair: RepairTurn | None = None,
     ) -> LLMResult:
-        try:
-            return await asyncio.wait_for(
-                self._call_with_retry(
-                    system=system,
-                    user=user,
-                    tool_schema=tool_schema,
-                    tool_name=tool_name,
-                    repair=repair,
-                ),
-                timeout=self.timeout_s,
-            )
-        except TimeoutError as e:
-            raise LLMTimeout(f"LLM call exceeded {self.timeout_s}s") from e
+        # Wrap the whole call (incl. timeout + retry) in one span. gh#64:
+        # `span_for_llm` previously had zero call sites, so no LLM spans existed.
+        with span_for_llm(self.model):
+            try:
+                return await asyncio.wait_for(
+                    self._call_with_retry(
+                        system=system,
+                        user=user,
+                        tool_schema=tool_schema,
+                        tool_name=tool_name,
+                        repair=repair,
+                    ),
+                    timeout=self.timeout_s,
+                )
+            except TimeoutError as e:
+                raise LLMTimeout(f"LLM call exceeded {self.timeout_s}s") from e
 
     async def _call_with_retry(
         self,
