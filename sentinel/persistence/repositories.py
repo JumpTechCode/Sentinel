@@ -19,6 +19,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 
 from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.persistence.models import (
@@ -32,7 +33,7 @@ from sentinel.persistence.models import (
 from sentinel.schemas.alert import NormalizedAlert
 from sentinel.schemas.api import IncidentDetailResponse, IncidentListItem, ResolveIncidentRequest
 from sentinel.schemas.context import DeployItem, IncidentContext, RelatedAlertItem
-from sentinel.schemas.enums import SeverityType
+from sentinel.schemas.enums import IncidentStatusType, SeverityType
 
 # --- Read DTOs -------------------------------------------------------------- #
 
@@ -391,7 +392,15 @@ class IncidentRepository(Protocol):
 
     async def get(self, incident_id: UUID) -> IncidentDetailResponse | None: ...
 
-    async def list_recent(self, *, limit: int = 50) -> list[IncidentListItem]: ...
+    async def list_incidents(
+        self,
+        *,
+        status: IncidentStatusType | None = None,
+        service: str | None = None,
+        severity: SeverityType | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[IncidentListItem], int]: ...
 
     async def mark_diagnosing(self, incident_id: UUID) -> None: ...
 
@@ -487,11 +496,36 @@ class PostgresIncidentRepository:
                 resolved_at=row.resolved_at,
             )
 
-    async def list_recent(self, *, limit: int = 50) -> list[IncidentListItem]:
+    async def list_incidents(
+        self,
+        *,
+        status: IncidentStatusType | None = None,
+        service: str | None = None,
+        severity: SeverityType | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[IncidentListItem], int]:
         async with self._session_factory() as s:
-            stmt = select(IncidentModel).order_by(IncidentModel.opened_at.desc()).limit(limit)
-            result = await s.execute(stmt)
-            return [
+            conditions: list[ColumnElement[bool]] = []
+            if status is not None:
+                conditions.append(IncidentModel.status == status)
+            if service is not None:
+                conditions.append(IncidentModel.service == service)
+            if severity is not None:
+                conditions.append(IncidentModel.severity == severity)
+
+            stmt = select(IncidentModel)
+            if conditions:
+                stmt = stmt.where(*conditions)
+            stmt = stmt.order_by(IncidentModel.opened_at.desc()).limit(limit).offset(offset)
+            rows = (await s.execute(stmt)).scalars().all()
+
+            count_stmt = select(func.count()).select_from(IncidentModel)
+            if conditions:
+                count_stmt = count_stmt.where(*conditions)
+            total = (await s.execute(count_stmt)).scalar_one()
+
+            items = [
                 IncidentListItem(
                     id=row.id,
                     service=row.service,
@@ -501,8 +535,9 @@ class PostgresIncidentRepository:
                     opened_at=row.opened_at,
                     resolved_at=row.resolved_at,
                 )
-                for row in result.scalars()
+                for row in rows
             ]
+            return items, total
 
     async def mark_diagnosing(self, incident_id: UUID) -> None:
         async with self._session_factory() as s:

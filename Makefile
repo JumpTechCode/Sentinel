@@ -101,8 +101,8 @@ compose-up:  ## docker compose up -d
 compose-down:  ## docker compose down -v
 	docker compose down -v
 
-openapi:  ## Export OpenAPI JSON (placeholder until Work Area I)
-	@echo "openapi: not implemented yet (Work Area I)"; exit 0
+openapi:  ## Export OpenAPI JSON to openapi.json
+	$(PY) scripts/export_openapi.py openapi.json
 
 clean:  ## Remove venv and caches
 	rm -rf $(VENV) .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov

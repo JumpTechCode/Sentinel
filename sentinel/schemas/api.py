@@ -70,6 +70,14 @@ class IncidentListItem(BaseModel):
     resolved_at: datetime | None = None
 
 
+class IncidentListResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    items: list[IncidentListItem]
+    total: int
+    limit: int
+    offset: int
+
+
 class IncidentDetailResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
     id: UUID
