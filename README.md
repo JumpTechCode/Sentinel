@@ -53,6 +53,62 @@ _From eval run `e7128643-f3f2-4101-9513-ad381fbd4b99` (auto-generated; do not ed
 > so it now measures consistency rather than a single lucky shot — two cases
 > where the model's category wobbles across shots are why it reads 80% here.
 
+## See it run — webhook to diagnosis
+
+The numbers above come from the CI harness. To watch the live pipeline turn a
+webhook into a diagnosis on your machine — first-time setup is `make bootstrap`
+then `cp .env.example .env`, with `SENTINEL_ANTHROPIC_API_KEY` and
+`SENTINEL_GENERIC_WEBHOOK_SECRET` filled in (the empty default disables the
+generic source, so the webhook would 401):
+
+```bash
+make compose-up          # Postgres, Redis, Kafka, app — waits on healthchecks
+make migrate             # apply the schema (alembic upgrade head)
+
+# Fire a sample incident, HMAC-signed with your SENTINEL_GENERIC_WEBHOOK_SECRET:
+SECRET=$(grep '^SENTINEL_GENERIC_WEBHOOK_SECRET=' .env | cut -d= -f2-)
+BODY='{"id":"demo-1","service":"checkout-api","severity":"SEV1","title":"Checkout p99 latency spiked to 8s after deploy"}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
+curl -s -X POST localhost:8000/webhooks/generic \
+  -H 'Content-Type: application/json' \
+  -H "X-Sentinel-Signature: sha256=$SIG" \
+  -d "$BODY"
+# → {"status":"accepted","incident_id":"<uuid>"}
+
+# Diagnosis runs out-of-band (Kafka → enrichment → Anthropic). Poll the incident:
+curl -s localhost:8000/incidents/<uuid> | jq '.diagnoses[0]'
+```
+
+The pipeline returns a schema-validated diagnosis — category, confidence,
+hypothesis, suggested actions — with every evidence citation checked against the
+assembled context first. On a bare stack with no deploy/log/alert integrations
+wired, that check is exactly what you want to see fire:
+
+```jsonc
+{
+  "likely_category": "deploy",
+  "confidence": 0.35,                 // capped: no verifiable evidence to lean on
+  "hypothesis": "Checkout-api p99 latency spike to 8s is likely caused by a recent
+                 deployment … though context status degradation prevents full verification.",
+  "hallucinated_evidence": true,      // ← the evidence-citation gate caught invented refs
+  "evidence": [],                     //    and stripped them before scoring
+  "suggested_actions": [
+    { "description": "Roll back the most recent checkout-api deployment …",
+      "risk": "low", "requires_human_approval": true }
+  ]
+}
+```
+
+That low, honest confidence is the system working as designed: with nothing real
+to cite, the gate strips the invented references, flags `hallucinated_evidence`,
+and caps confidence at 0.4 rather than letting the model sound sure. Point the
+fetchers at real tooling — or see the eval results above, scored against real
+postmortems with full context — and the same gate rewards well-grounded
+diagnoses with high confidence instead.
+
+> The evals replay recorded LLM responses and cost nothing; this live path makes
+> a real Anthropic call (a few cents per diagnosis).
+
 ## Why it's built this way
 
 A few load-bearing choices that distinguish Sentinel from a typical "LLM wrapper":
@@ -66,44 +122,37 @@ A few load-bearing choices that distinguish Sentinel from a typical "LLM wrapper
 
 ADRs for the non-obvious calls live in [`docs/adr/`](docs/adr/).
 
+> **Isn't this over-built for a single-tenant copilot?** For the workload, yes —
+> and deliberately so. The point is to demonstrate distributed-systems patterns
+> built correctly (transactional outbox, idempotent Kafka producer, per-dependency
+> circuit breakers, pgvector memory), not to ship the smallest thing that works.
+> A real single-tenant deployment would collapse Kafka into the outbox-as-queue
+> and drop the broker, keeping everything else — see
+> [ADR 0015](docs/adr/0015-deliberate-production-patterns.md). Naming the
+> trade-off is part of the engineering.
+
 ## Stack
 
 Python 3.12 · FastAPI · asyncio · Pydantic v2 · Postgres 16 + `pgvector` · Redis 7 · Kafka (KRaft) · Anthropic (`claude-sonnet-4-5` default) · OpenTelemetry + Prometheus + structlog · Docker Compose. Next.js 14 + Tailwind for the demo UI (later phase).
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    A["POST /webhooks/:source<br/>HMAC verified · payload-hash idempotent<br/>normalized to NormalizedAlert"]
+    A -->|"202 Accepted, returns fast"| B[("Postgres<br/>incidents + outbox_events<br/>written in one transaction")]
+    B -->|"outbox drainer"| K{{"Kafka · sentinel.incidents"}}
+    K -->|"incident.opened"| E["Enrichment<br/>parallel fetchers · per-integration circuit breakers<br/>deploys · related/active alerts · recent logs · runbooks"]
+    E <-->|"similar incidents"| MEM[("pgvector<br/>incident memory")]
+    E -->|"incident.enriched"| K
+    K -->|"incident.enriched"| D["Diagnosis<br/>versioned prompt to Anthropic at temperature 0<br/>schema-validated · evidence-citation gate<br/>idempotent per incident + prompt_version"]
+    D --> R["Structured diagnosis<br/>confidence · evidence refs · suggested actions"]
+    RES["POST /incidents/:id/resolve"] -.->|"embed root cause on resolve"| MEM
 ```
-        ┌──────────────────────────────────────────────────────────┐
-        │  POST /webhooks/{source}  (HMAC verified, payload-hash   │
-        │  idempotent, normalized → NormalizedAlert)               │
-        └───────────────┬──────────────────────────────────────────┘
-                        │  202 Accepted (returns fast)
-                        ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │  Postgres  ←→  outbox_events                             │
-        │     incidents (fingerprint dedup, event_log appended)    │
-        └───────────────┬──────────────────────────────────────────┘
-                        │  outbox drainer
-                        ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │  Kafka topic: sentinel.incidents                         │
-        │   incident.opened / incident.recurred / incident.enriched│
-        └───────────────┬──────────────────────────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │  Enrichment worker — parallel fetchers behind            │
-        │  per-integration circuit breakers                        │
-        │  (deploys · related alerts · active alerts · recent logs │
-        │  · runbooks · similar incidents from pgvector)           │
-        │  → IncidentContext written back, incident.enriched event │
-        └───────────────┬──────────────────────────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │  Diagnosis worker — versioned prompt + Anthropic call,   │
-        │  schema-validated response, evidence-citation gate,      │
-        │  idempotent persistence keyed on (incident, prompt_ver)  │
-        └──────────────────────────────────────────────────────────┘
-```
+
+Every external call in that flow has a timeout and a circuit breaker; every LLM
+response is schema-validated; every evidence citation is verified against the
+assembled context before the diagnosis is trusted.
 
 ## HTTP API
 
@@ -181,6 +230,7 @@ If a code path can't articulate its failure mode, it isn't done.
 - Python 3.12
 - Docker + Docker Compose v2 (Postgres 16 + pgvector, Redis 7, Kafka 3.7)
 - GNU Make
+- `jq` and `openssl` — only for the "See it run" demo above (both ship with most systems)
 
 ### Bootstrap
 
