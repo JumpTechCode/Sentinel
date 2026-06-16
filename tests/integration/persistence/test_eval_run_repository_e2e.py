@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -94,6 +95,9 @@ def test_full_run_lifecycle(pg_dsn: str) -> None:
             assert row.status == "ok"
             assert row.metrics["category_match"] == 1.0
             assert row.metrics_stability["evidence_quality"] == 0.05
+
+            assert row.started_at is not None
+            assert isinstance(row.started_at, datetime)
 
             latest = await repo.get_latest_ok_run()
             assert latest is not None

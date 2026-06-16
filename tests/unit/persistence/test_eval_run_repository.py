@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -30,6 +31,7 @@ def test_eval_run_record_is_frozen() -> None:
         regression_passed=None,
         regression_detail=None,
         extra={},
+        started_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         rec.status = "failed"  # type: ignore[misc]
