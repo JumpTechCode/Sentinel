@@ -47,6 +47,24 @@ async def test_different_source_is_not_duplicate(redis: FakeRedis) -> None:
 
 
 @pytest.mark.asyncio
+async def test_unmark_makes_body_processable_again(redis: FakeRedis) -> None:
+    """After unmark, the same body is treated as new — the compensating delete
+    that closes the lost-event window (issue #62)."""
+    store = RedisIdempotencyStore(redis)
+    body = b'{"a":1}'
+    assert await store.check_and_mark("sentry", body) is False  # marked
+    await store.unmark("sentry", body)
+    assert await store.check_and_mark("sentry", body) is False  # processable again
+
+
+@pytest.mark.asyncio
+async def test_unmark_absent_key_is_noop(redis: FakeRedis) -> None:
+    store = RedisIdempotencyStore(redis)
+    # Deleting a key that was never set must not raise.
+    await store.unmark("sentry", b'{"never":"set"}')
+
+
+@pytest.mark.asyncio
 async def test_ttl_is_24h(redis: FakeRedis) -> None:
     store = RedisIdempotencyStore(redis)
     await store.check_and_mark("sentry", b'{"a":1}')

@@ -35,6 +35,7 @@ def _make_handler(
     )
     idempotency = MagicMock()
     idempotency.check_and_mark = AsyncMock(return_value=False)
+    idempotency.unmark = AsyncMock()
     handler = WebhookHandler(
         incident_repo=incident_repo,
         idempotency=idempotency,
@@ -142,6 +143,51 @@ async def test_bad_json_returns_bad_request(fixture_body: bytes) -> None:
         body=bad,
     )
     assert result.outcome == HandlerOutcome.BAD_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_ingest_failure_unmarks_idempotency_key(fixture_body: bytes) -> None:
+    """Lost-event race (issue #62): if persistence fails *after* the idempotency
+    key is marked, the key must be cleared so the sender's byte-identical retry
+    re-processes the event instead of being silently deduped into oblivion.
+    """
+    handler, repo, idem = _make_handler()
+    repo.ingest = AsyncMock(side_effect=RuntimeError("transient db failure"))
+    from sentinel.integrations.base import compute_hmac_sha256
+
+    sig = compute_hmac_sha256(fixture_body, b"shh")
+    result = await handler.handle(
+        source="sentry",
+        headers={"Sentry-Hook-Signature": sig},
+        body=fixture_body,
+    )
+
+    # Sender must see a retryable status (503), not a 2xx that ends delivery.
+    assert result.outcome == HandlerOutcome.INFRA_UNAVAILABLE
+    # The compensating delete must have fired so the retry is not deduped.
+    idem.unmark.assert_awaited_once_with("sentry", fixture_body)
+
+
+@pytest.mark.asyncio
+async def test_ingest_failure_still_503_when_unmark_also_fails(
+    fixture_body: bytes,
+) -> None:
+    """If the compensating unmark itself fails (e.g. Redis down), the handler
+    must still return a retryable 503 rather than surfacing the unmark error.
+    """
+    handler, repo, idem = _make_handler()
+    repo.ingest = AsyncMock(side_effect=RuntimeError("transient db failure"))
+    idem.unmark = AsyncMock(side_effect=RuntimeError("redis down"))
+    from sentinel.integrations.base import compute_hmac_sha256
+
+    sig = compute_hmac_sha256(fixture_body, b"shh")
+    result = await handler.handle(
+        source="sentry",
+        headers={"Sentry-Hook-Signature": sig},
+        body=fixture_body,
+    )
+
+    assert result.outcome == HandlerOutcome.INFRA_UNAVAILABLE
 
 
 @pytest.mark.asyncio
