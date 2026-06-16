@@ -93,8 +93,12 @@ postgres-data/
 redis-data/
 kafka-data/
 
-# Test model cache (fastembed downloads ~400MB ONNX models here)
+# Fastembed model cache (downloads ~400MB ONNX models here). Unit tests use
+# .test-model-cache; the evals-gate / unit warm-up step caches under
+# .fastembed-cache. Both must be ignored so the download never dirties the
+# working tree (the eval runner refuses to run on a dirty tree).
 .test-model-cache/
+.fastembed-cache/
 
 # Node / frontend (Next.js UI)
 node_modules/
