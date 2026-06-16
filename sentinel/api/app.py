@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 
 from sentinel import __version__
+from sentinel.api.routes.evals import router as evals_router
 from sentinel.api.routes.health import router as health_router
 from sentinel.api.routes.incidents import router as incidents_router
 from sentinel.api.routes.metrics import router as metrics_router
@@ -60,6 +61,7 @@ from sentinel.persistence.repositories import (
     OutboxRepository,
     PostgresDeployRepository,
     PostgresDiagnosisRepository,
+    PostgresEvalRunRepository,
     PostgresIncidentRepository,
     PostgresOutboxRepository,
     PostgresResolutionRepository,
@@ -163,6 +165,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     resolution_repo = PostgresResolutionRepository(session_factory)
     app.state.resolution_repo = resolution_repo
     app.state.incident_repo = incident_repo
+    app.state.eval_run_repo = PostgresEvalRunRepository(session_factory)
     app.state.outbox_topic = settings.kafka_topic_incidents
 
     # Aliveness map for background Kafka consumers. Populated below per-stream
@@ -509,6 +512,7 @@ def build_app() -> FastAPI:
     app.include_router(resolve_router)
     app.include_router(incidents_router)
     app.include_router(metrics_router)
+    app.include_router(evals_router)
     return app
 
 
