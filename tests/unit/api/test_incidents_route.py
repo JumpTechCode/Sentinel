@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
+from _pytest.monkeypatch import MonkeyPatch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sentinel.api.routes.incidents import router as incidents_router
+from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.schemas.api import IncidentDetailResponse, IncidentListItem
 
 from tests.unit.diagnosis.fakes import make_context
@@ -193,3 +196,200 @@ def test_create_increments_outbox_enqueue_metric() -> None:
     assert resp.status_code == 201, resp.text
     # The handler mirrors the webhook path's outbox-enqueue counter.
     assert _count() - before == 1.0
+
+
+def test_detail_includes_latest_diagnosis() -> None:
+    from decimal import Decimal
+
+    from sentinel.diagnosis.persisted import PersistedDiagnosis
+    from sentinel.schemas.diagnosis import EvidenceRef
+
+    incident_id = uuid4()
+    pd = PersistedDiagnosis(
+        hypothesis="pool exhausted",
+        confidence=Decimal("0.82"),
+        reasoning="saturated after deploy",
+        evidence=[EvidenceRef(kind="deploy", id="deploy:abc", note="10m before")],
+        suggested_actions=[],
+        likely_category="deploy",
+        hallucinated_evidence=False,
+        model="claude-sonnet-4-5",
+        prompt_version="v1",
+        latency_ms=10,
+        token_usage={},
+    )
+    repo = type("R", (), {})()
+    repo.get = AsyncMock(return_value=_detail(incident_id))
+    repo.get_enrichment_context = AsyncMock(return_value=None)
+    diag_repo = type("D", (), {})()
+    diag_repo.get_by_incident_id = AsyncMock(return_value=pd)
+
+    app = FastAPI()
+    app.state.incident_repo = repo
+    app.state.diagnosis_repo = diag_repo
+    app.include_router(incidents_router)
+    resp = TestClient(app).get(f"/incidents/{incident_id}")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert len(data["diagnoses"]) == 1
+    assert data["diagnoses"][0]["hypothesis"] == "pool exhausted"
+    assert data["diagnoses"][0]["hallucinated_evidence"] is False
+    # Internal metrics are intentionally not part of the diagnosis read shape.
+    assert "token_usage" not in data["diagnoses"][0]
+    assert "latency_ms" not in data["diagnoses"][0]
+
+
+def test_detail_empty_diagnoses_when_none() -> None:
+    incident_id = uuid4()
+    repo = type("R", (), {})()
+    repo.get = AsyncMock(return_value=_detail(incident_id))
+    repo.get_enrichment_context = AsyncMock(return_value=None)
+    diag_repo = type("D", (), {})()
+    diag_repo.get_by_incident_id = AsyncMock(return_value=None)
+
+    app = FastAPI()
+    app.state.incident_repo = repo
+    app.state.diagnosis_repo = diag_repo
+    app.include_router(incidents_router)
+    resp = TestClient(app).get(f"/incidents/{incident_id}")
+    assert resp.status_code == 200
+    assert resp.json()["diagnoses"] == []
+
+
+def test_detail_tolerates_missing_diagnosis_repo() -> None:
+    # PR 1's _app(repo) helper sets only incident_repo; the handler must not 500.
+    incident_id = uuid4()
+    repo = type("R", (), {})()
+    repo.get = AsyncMock(return_value=_detail(incident_id))
+    repo.get_enrichment_context = AsyncMock(return_value=None)
+    resp = TestClient(_app(repo)).get(f"/incidents/{incident_id}")
+    assert resp.status_code == 200
+    assert resp.json()["diagnoses"] == []
+
+
+def _diagnose_app(
+    *,
+    incident: object,
+    context_stored: object,
+    persisted_result: str,
+) -> tuple[FastAPI, Any, Any]:
+    app = FastAPI()
+    repo = type("R", (), {})()
+    repo.get = AsyncMock(return_value=incident)
+    repo.get_enrichment_context = AsyncMock(return_value=context_stored)
+    app.state.incident_repo = repo
+    diag_repo = type("D", (), {})()
+    diag_repo.save_with_outbox = AsyncMock(return_value=(uuid4(), persisted_result))
+    app.state.diagnosis_repo = diag_repo
+    app.state.diagnosis_deps = SimpleNamespace()  # opaque; diagnose() is monkeypatched
+    app.state.cassette_transport = None
+    app.state.diagnosis_prompt_version = "v1"
+    app.state.diagnosis_model = "claude-sonnet-4-5"
+    app.state.outbox_topic = "sentinel.incidents"
+    app.include_router(incidents_router)
+    return app, repo, diag_repo
+
+
+def _persisted_record() -> PersistedDiagnosis:
+    from decimal import Decimal
+
+    from sentinel.schemas.diagnosis import EvidenceRef
+
+    return PersistedDiagnosis(
+        hypothesis="pool exhausted",
+        confidence=Decimal("0.82"),
+        reasoning="r",
+        evidence=[EvidenceRef(kind="deploy", id="deploy:abc", note="n")],
+        suggested_actions=[],
+        likely_category="deploy",
+        hallucinated_evidence=False,
+        model="claude-sonnet-4-5",
+        prompt_version="v1",
+        latency_ms=5,
+        token_usage={},
+    )
+
+
+def test_diagnose_persists_and_returns_view(monkeypatch: MonkeyPatch) -> None:
+    incident_id = uuid4()
+    ctx = SimpleNamespace(context=make_context(incident_id=incident_id))
+    record = _persisted_record()
+
+    async def fake_diagnose(_inc: object, _ctx: object, _deps: object) -> PersistedDiagnosis:
+        return record
+
+    monkeypatch.setattr("sentinel.api.routes.incidents.diagnose", fake_diagnose)
+    app, _repo, diag_repo = _diagnose_app(
+        incident=_detail(incident_id), context_stored=ctx, persisted_result="new"
+    )
+    resp = TestClient(app).post(f"/incidents/{incident_id}/diagnose")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["persisted"] == "new"
+    assert data["diagnosis"]["hypothesis"] == "pool exhausted"
+    diag_repo.save_with_outbox.assert_awaited_once()
+
+
+def test_diagnose_404_when_incident_missing() -> None:
+    incident_id = uuid4()
+    app, _repo, _diag = _diagnose_app(incident=None, context_stored=None, persisted_result="new")
+    resp = TestClient(app).post(f"/incidents/{incident_id}/diagnose")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "incident_not_found"
+
+
+def test_diagnose_409_when_no_context() -> None:
+    incident_id = uuid4()
+    app, _repo, _diag = _diagnose_app(
+        incident=_detail(incident_id), context_stored=None, persisted_result="new"
+    )
+    resp = TestClient(app).post(f"/incidents/{incident_id}/diagnose")
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "context_not_assembled"
+
+
+def test_diagnose_409_on_cassette_miss(monkeypatch: MonkeyPatch) -> None:
+    from sentinel.evals.cassette import CassetteMiss
+
+    incident_id = uuid4()
+    ctx = SimpleNamespace(context=make_context(incident_id=incident_id))
+
+    async def boom(_i: object, _c: object, _d: object) -> PersistedDiagnosis:
+        raise CassetteMiss("no cassette")
+
+    monkeypatch.setattr("sentinel.api.routes.incidents.diagnose", boom)
+    app, _repo, _diag = _diagnose_app(
+        incident=_detail(incident_id), context_stored=ctx, persisted_result="new"
+    )
+    resp = TestClient(app).post(f"/incidents/{incident_id}/diagnose")
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "no_recording_available"
+
+
+def test_diagnose_503_when_deps_unavailable() -> None:
+    incident_id = uuid4()
+    app = FastAPI()
+    repo = type("R", (), {})()
+    repo.get = AsyncMock(return_value=_detail(incident_id))
+    repo.get_enrichment_context = AsyncMock(return_value=None)
+    app.state.incident_repo = repo
+    app.state.diagnosis_repo = None
+    app.state.diagnosis_deps = None
+    app.state.cassette_transport = None
+    app.state.outbox_topic = "sentinel.incidents"
+    app.include_router(incidents_router)
+    resp = TestClient(app).post(f"/incidents/{incident_id}/diagnose")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "diagnosis_unavailable"
+
+
+def test_diagnose_409_when_incident_resolved() -> None:
+    incident_id = uuid4()
+    resolved = _detail(incident_id).model_copy(update={"status": "resolved"})
+    # The resolved guard fires before the context fetch, so context_stored is moot.
+    app, _repo, _diag = _diagnose_app(
+        incident=resolved, context_stored=None, persisted_result="new"
+    )
+    resp = TestClient(app).post(f"/incidents/{incident_id}/diagnose")
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "incident_already_resolved"

@@ -277,20 +277,56 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.enrichment_consumer = enricher
 
     # ---- Diagnosis ---------------------------------------------------------
-    # Guarded by `diagnosis_consumer_enabled` so it can be disabled in envs
-    # that lack Anthropic credentials (e.g., integration-test runs that only
-    # exercise ingestion/enrichment). The consumer subscribes to the same
-    # `sentinel.incidents` topic as the enricher but uses a distinct group ID
-    # so both receive every event independently.
+    # AnthropicClient, prompt, repo, audit logger, and agent-level DiagnosisDeps
+    # are constructed UNCONDITIONALLY so the synchronous POST /incidents/{id}/diagnose
+    # route and the detail-diagnoses read work even when the Kafka consumer is
+    # disabled (e.g., integration-test runs that only exercise ingestion/enrichment).
+    # The Kafka consumer itself is still gated on `diagnosis_consumer_enabled` and
+    # reuses these already-constructed pieces.
+    cassette_http_client: httpx.AsyncClient | None = None
+    cassette_transport: CassetteTransport | None = None
+    if settings.eval_mode and settings.eval_cassette_dir is not None:
+        from sentinel.evals.cassette import CassetteTransport
+
+        cassette_transport = CassetteTransport(
+            mode=settings.eval_cassette_mode,
+            cassette_dir=settings.eval_cassette_dir,
+        )
+        cassette_http_client = httpx.AsyncClient(transport=cassette_transport)
+
+    llm_client = AnthropicClient(
+        api_key=settings.anthropic_api_key,
+        model=settings.anthropic_model,
+        timeout_s=settings.diagnosis_llm_timeout_seconds,
+        max_output_tokens=settings.diagnosis_max_output_tokens,
+        http_client=cassette_http_client,
+    )
+    prompt_bundle = PromptBundle.load(settings.diagnosis_prompt_version)
+    diagnosis_repo = PostgresDiagnosisRepository(session_factory)
+    audit_logger = LLMAuditLogger(settings.llm_audit_log_path)
+
+    agent_diagnosis_deps = DiagnosisDeps(
+        llm=llm_client,
+        prompt=prompt_bundle,
+        max_input_tokens=settings.diagnosis_max_input_tokens,
+        audit_logger=audit_logger,
+    )
+
+    # Stashed unconditionally so routes and the eval runner can rely on these
+    # existing on app.state regardless of whether the Kafka consumer is wired.
+    app.state.cassette_transport = cassette_transport
+    app.state.diagnosis_deps = agent_diagnosis_deps
+    app.state.diagnosis_repo = diagnosis_repo
+    app.state.diagnosis_prompt_version = settings.diagnosis_prompt_version
+    app.state.diagnosis_model = settings.anthropic_model
+
+    # Kafka consumer — gated on `diagnosis_consumer_enabled`. When enabled it
+    # subscribes to the same `sentinel.incidents` topic as the enricher but uses
+    # a distinct group ID so both receive every event independently. Reuses the
+    # llm_client / prompt_bundle / diagnosis_repo / audit_logger built above.
     diagnosis_task: asyncio.Task[None] | None = None
     diag_kafka_consumer: AIOKafkaConsumer | None = None
     diagnoser: DiagnosisConsumer | None = None
-    cassette_http_client: httpx.AsyncClient | None = None
-    cassette_transport: CassetteTransport | None = None
-    # Agent-level deps the eval runner uses to invoke diagnose() directly for
-    # in-memory shots 1+ (multi-shot stability, #49). None unless the diagnosis
-    # consumer is wired (which eval mode requires); the runner guards on it.
-    agent_diagnosis_deps: DiagnosisDeps | None = None
     if settings.diagnosis_consumer_enabled:
         diag_kafka_consumer = AIOKafkaConsumer(
             settings.kafka_topic_incidents,
@@ -300,26 +336,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             auto_offset_reset="earliest",
         )
 
-        if settings.eval_mode and settings.eval_cassette_dir is not None:
-            from sentinel.evals.cassette import CassetteTransport
-
-            cassette_transport = CassetteTransport(
-                mode=settings.eval_cassette_mode,
-                cassette_dir=settings.eval_cassette_dir,
-            )
-            cassette_http_client = httpx.AsyncClient(transport=cassette_transport)
-
-        llm_client = AnthropicClient(
-            api_key=settings.anthropic_api_key,
-            model=settings.anthropic_model,
-            timeout_s=settings.diagnosis_llm_timeout_seconds,
-            max_output_tokens=settings.diagnosis_max_output_tokens,
-            http_client=cassette_http_client,
-        )
-        prompt_bundle = PromptBundle.load(settings.diagnosis_prompt_version)
-        diagnosis_repo = PostgresDiagnosisRepository(session_factory)
-        audit_logger = LLMAuditLogger(settings.llm_audit_log_path)
-
         diagnosis_deps = DiagnosisConsumerDeps(
             llm=llm_client,
             prompt=prompt_bundle,
@@ -328,7 +344,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             diagnosis_repo=diagnosis_repo,
             audit_logger=audit_logger,
         )
-        agent_diagnosis_deps = diagnosis_deps.agent_deps()
         diagnoser = DiagnosisConsumer(
             consumer=diag_kafka_consumer,
             deps=diagnosis_deps,
@@ -341,23 +356,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.consumer_alive["diagnosis"] = True
         diagnosis_task.add_done_callback(_on_consumer_task_done("diagnosis", app))
         app.state.diagnosis_consumer = diagnoser
-    elif settings.eval_mode:
-        # Eval mode requires a diagnosis consumer to wrap the LLM client with
-        # the cassette transport. Without it, the runner has no AnthropicClient
-        # to drive — surface this as a loud warning rather than failing silently.
-        log.warning(
-            "eval_mode_skipping_cassette_wiring",
-            extra={"reason": "diagnosis_consumer_enabled=False"},
-        )
-
-    # Stashed unconditionally (None when not eval mode or no cassette dir) so
-    # the runner can rely on `app.state.cassette_transport` existing.
-    app.state.cassette_transport = cassette_transport
-    # Same rationale for the agent-level diagnosis deps: the eval runner reads
-    # this off app.state to drive in-memory shots 1+ (#49). None when the
-    # diagnosis consumer isn't wired; the runner raises if multi-shot is
-    # requested without it.
-    app.state.diagnosis_deps = agent_diagnosis_deps
 
     handler = WebhookHandler(
         incident_repo=incident_repo,
