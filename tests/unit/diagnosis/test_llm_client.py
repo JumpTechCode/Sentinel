@@ -42,6 +42,7 @@ def _make_fake_message(
     tool_name: str = _TOOL_NAME,
     tool_input: dict[str, Any] | None = None,
     include_tool_block: bool = True,
+    tool_use_id: str = "toolu_abc123",
     input_tokens: int = 100,
     output_tokens: int = 200,
     stop_reason: str = "tool_use",
@@ -56,6 +57,7 @@ def _make_fake_message(
         block = MagicMock()
         block.type = "tool_use"
         block.name = tool_name
+        block.id = tool_use_id
         block.input = tool_input if tool_input is not None else _TOOL_INPUT
         msg.content = [block]
     else:
@@ -129,6 +131,24 @@ async def test_happy_path_returns_llm_result() -> None:
     assert result.output_tokens == 150
     assert result.stop_reason == "tool_use"
     assert result.latency_ms >= 0
+
+
+async def test_stream_call_sets_temperature_zero() -> None:
+    """The diagnosis call must pin temperature=0 for run-to-run stability
+    (issue #63: previously unset → API default 1.0)."""
+    msg = _make_fake_message()
+    stream = _FakeStream(msg)
+    client = _make_client(stream_result=stream)
+
+    await client.diagnose_call(
+        system="sys",
+        user="user",
+        tool_schema=_TOOL_SCHEMA,
+        tool_name=_TOOL_NAME,
+    )
+
+    _, kwargs = client._client.messages.stream.call_args  # type: ignore[attr-defined]
+    assert kwargs["temperature"] == 0
 
 
 async def test_timeout_raises_llm_timeout() -> None:
@@ -223,6 +243,57 @@ async def test_http_client_passthrough() -> None:
         mock_cls.assert_called_once_with(api_key="sk-fake", http_client=fake_http_client)
     finally:
         await fake_http_client.aclose()
+
+
+async def test_llm_result_carries_tool_use_id() -> None:
+    """The tool_use block id must be captured so a repair turn can reference it."""
+    msg = _make_fake_message(tool_use_id="toolu_xyz")
+    client = _make_client(stream_result=_FakeStream(msg))
+    result = await client.diagnose_call(
+        system="sys", user="user", tool_schema=_TOOL_SCHEMA, tool_name=_TOOL_NAME
+    )
+    assert result.tool_use_id == "toolu_xyz"
+
+
+async def test_repair_builds_tool_result_turn() -> None:
+    """On repair, the request replays the prior assistant tool_use turn plus a
+    tool_result describing the error — a real multi-turn exchange, not prose
+    appended to the user string (issue #63)."""
+    from sentinel.diagnosis.llm_client import RepairTurn
+
+    msg = _make_fake_message()
+    client = _make_client(stream_result=_FakeStream(msg))
+    repair = RepairTurn(
+        tool_use_id="toolu_prev",
+        tool_input={"hypothesis": ""},
+        error="hypothesis must be non-empty",
+    )
+
+    await client.diagnose_call(
+        system="sys",
+        user="original-user",
+        tool_schema=_TOOL_SCHEMA,
+        tool_name=_TOOL_NAME,
+        repair=repair,
+    )
+
+    _, kwargs = client._client.messages.stream.call_args  # type: ignore[attr-defined]
+    messages = kwargs["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    # Original user prompt preserved as the first turn.
+    assert messages[0]["content"] == "original-user"
+    # Assistant turn replays the exact prior tool_use block (id + name + input).
+    tool_use = messages[1]["content"][0]
+    assert tool_use["type"] == "tool_use"
+    assert tool_use["id"] == "toolu_prev"
+    assert tool_use["name"] == _TOOL_NAME
+    assert tool_use["input"] == {"hypothesis": ""}
+    # Final user turn is a tool_result error referencing that tool_use id.
+    tool_result = messages[2]["content"][0]
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["tool_use_id"] == "toolu_prev"
+    assert tool_result["is_error"] is True
+    assert "hypothesis must be non-empty" in tool_result["content"]
 
 
 async def test_no_tool_call_raises_llm_no_tool_call() -> None:
