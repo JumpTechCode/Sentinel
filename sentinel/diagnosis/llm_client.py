@@ -15,7 +15,7 @@ from typing import Any, cast
 import anthropic
 import httpx
 from anthropic import AsyncAnthropic
-from anthropic.types import ToolParam
+from anthropic.types import MessageParam, ToolParam
 from pydantic import SecretStr
 
 from sentinel.diagnosis.errors import LLMNoToolCall, LLMTimeout, LLMTransport
@@ -30,6 +30,23 @@ class LLMResult:
     output_tokens: int
     stop_reason: str
     latency_ms: int
+    # id of the returned tool_use block; needed to replay the turn in a repair
+    # exchange (see RepairTurn). Empty only for hand-built test fixtures.
+    tool_use_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RepairTurn:
+    """One round of schema-repair context for a follow-up diagnosis call.
+
+    Replayed as a proper multi-turn exchange — the prior assistant tool_use
+    turn plus a tool_result describing the validation error — rather than prose
+    appended to the user message.
+    """
+
+    tool_use_id: str
+    tool_input: dict[str, Any]
+    error: str
 
 
 class AnthropicClient:
@@ -63,6 +80,7 @@ class AnthropicClient:
         user: str,
         tool_schema: dict[str, Any],
         tool_name: str,
+        repair: RepairTurn | None = None,
     ) -> LLMResult:
         try:
             return await asyncio.wait_for(
@@ -71,6 +89,7 @@ class AnthropicClient:
                     user=user,
                     tool_schema=tool_schema,
                     tool_name=tool_name,
+                    repair=repair,
                 ),
                 timeout=self.timeout_s,
             )
@@ -84,6 +103,7 @@ class AnthropicClient:
         user: str,
         tool_schema: dict[str, Any],
         tool_name: str,
+        repair: RepairTurn | None,
     ) -> LLMResult:
         try:
             return await self._stream_once(
@@ -91,6 +111,7 @@ class AnthropicClient:
                 user=user,
                 tool_schema=tool_schema,
                 tool_name=tool_name,
+                repair=repair,
             )
         except anthropic.APIStatusError:
             await asyncio.sleep(_BACKOFF_S)
@@ -100,9 +121,46 @@ class AnthropicClient:
                     user=user,
                     tool_schema=tool_schema,
                     tool_name=tool_name,
+                    repair=repair,
                 )
             except anthropic.APIStatusError as inner:
                 raise LLMTransport(str(inner)) from inner
+
+    @staticmethod
+    def _build_messages(user: str, tool_name: str, repair: RepairTurn | None) -> list[MessageParam]:
+        if repair is None:
+            return [{"role": "user", "content": user}]
+        # Replay the original prompt, the model's prior (invalid) tool_use turn,
+        # and a tool_result carrying the validation error — a real multi-turn
+        # repair exchange rather than prose appended to the user message.
+        return cast(
+            list[MessageParam],
+            [
+                {"role": "user", "content": user},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": repair.tool_use_id,
+                            "name": tool_name,
+                            "input": repair.tool_input,
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": repair.tool_use_id,
+                            "content": repair.error,
+                            "is_error": True,
+                        }
+                    ],
+                },
+            ],
+        )
 
     async def _stream_once(
         self,
@@ -111,13 +169,17 @@ class AnthropicClient:
         user: str,
         tool_schema: dict[str, Any],
         tool_name: str,
+        repair: RepairTurn | None,
     ) -> LLMResult:
         start = time.monotonic()
         stream = self._client.messages.stream(
             model=self.model,
             max_tokens=self.max_output_tokens,
+            # temperature=0 for run-to-run stability; the API exposes no seed, so
+            # this is as deterministic as a single-shot call can be.
+            temperature=0,
             system=system,
-            messages=[{"role": "user", "content": user}],
+            messages=self._build_messages(user, tool_name, repair),
             tools=[cast(ToolParam, tool_schema)],
             tool_choice={"type": "tool", "name": tool_name},
         )
@@ -137,5 +199,6 @@ class AnthropicClient:
                     output_tokens=getattr(usage, "output_tokens", 0),
                     stop_reason=getattr(final, "stop_reason", "tool_use"),
                     latency_ms=latency_ms,
+                    tool_use_id=getattr(block, "id", "") or "",
                 )
         raise LLMNoToolCall("model did not call the required tool")

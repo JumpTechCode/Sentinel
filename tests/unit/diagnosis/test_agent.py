@@ -223,6 +223,61 @@ async def test_schema_invalid_then_valid_succeeds_after_one_retry() -> None:
     )
 
 
+async def test_retry_passes_repair_turn_with_prior_tool_use_id() -> None:
+    """On schema-invalid → retry, the agent must hand the client a RepairTurn
+    carrying the prior tool_use id + input (so the client can replay a proper
+    tool_result exchange), not mutate the user string (issue #63)."""
+    from sentinel.diagnosis.llm_client import RepairTurn
+
+    ctx = make_context(deploys=[make_deploy("abc")])
+    bad = dict(
+        hypothesis="",  # fails min_length → triggers repair
+        confidence=0.5,
+        reasoning="r",
+        evidence=[{"kind": "deploy", "id": "deploy:abc", "note": "n"}],
+        suggested_actions=[],
+        likely_category="deploy",
+    )
+    good = dict(
+        hypothesis="h",
+        confidence=0.5,
+        reasoning="r",
+        evidence=[{"kind": "deploy", "id": "deploy:abc", "note": "n"}],
+        suggested_actions=[],
+        likely_category="deploy",
+    )
+    llm = AsyncMock()
+    llm.model = "claude-sonnet-4-5"
+    llm.diagnose_call.side_effect = [
+        LLMResult(
+            tool_input=bad,
+            input_tokens=10,
+            output_tokens=5,
+            stop_reason="tool_use",
+            latency_ms=5,
+            tool_use_id="toolu_first",
+        ),
+        LLMResult(
+            tool_input=good,
+            input_tokens=20,
+            output_tokens=7,
+            stop_reason="tool_use",
+            latency_ms=5,
+            tool_use_id="toolu_second",
+        ),
+    ]
+
+    await diagnose(_incident(ctx.incident_id), ctx, _deps(llm))
+
+    calls = llm.diagnose_call.call_args_list
+    assert calls[0].kwargs["repair"] is None  # first attempt: no repair
+    repair = calls[1].kwargs["repair"]
+    assert isinstance(repair, RepairTurn)
+    assert repair.tool_use_id == "toolu_first"
+    assert repair.tool_input == bad
+    assert "validation" in repair.error.lower()
+
+
 async def test_audit_logger_records_one_line_per_call_attempt() -> None:
     deploy = make_deploy("abc")
     ctx = make_context(deploys=[deploy])

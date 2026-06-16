@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from sentinel.diagnosis.deps import DiagnosisDeps
 from sentinel.diagnosis.errors import DiagnosisInvalid
+from sentinel.diagnosis.llm_client import RepairTurn
 from sentinel.diagnosis.persisted import PersistedDiagnosis
 from sentinel.diagnosis.prompt import serialize
 from sentinel.diagnosis.truncation import truncate_for_budget
@@ -62,12 +63,14 @@ async def diagnose(
 
     diagnosis_obj: Diagnosis | None = None
     last_result = None
+    repair: RepairTurn | None = None
     for attempt in (1, 2):
         last_result = await deps.llm.diagnose_call(
             system=system,
             user=user,
             tool_schema=tool_schema,
             tool_name=_TOOL_NAME,
+            repair=repair,
         )
         # Meter tokens and cost per attempt: a retried attempt still spent
         # tokens against the Anthropic bill, so all attempts must be counted
@@ -94,10 +97,16 @@ async def diagnose(
         except ValidationError as e:
             if attempt == 2:
                 raise DiagnosisInvalid(str(e)) from e
-            user = (
-                user
-                + f"\n\nYour previous response was invalid: {e}.\n"
-                + f"Return a valid {_TOOL_NAME} call."
+            # Repair as a proper multi-turn exchange: replay the model's invalid
+            # tool_use turn and answer it with a tool_result error, rather than
+            # appending prose to the user message.
+            repair = RepairTurn(
+                tool_use_id=last_result.tool_use_id,
+                tool_input=last_result.tool_input,
+                error=(
+                    f"Your previous response failed schema validation: {e}. "
+                    f"Return a corrected {_TOOL_NAME} call."
+                ),
             )
 
     # Both variables are always set after the loop: the loop runs at least once

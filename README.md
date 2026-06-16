@@ -1,6 +1,6 @@
 # Sentinel
 
-**AI on-call copilot.** Sentinel ingests production alerts (Sentry, PagerDuty, Datadog, generic webhooks), assembles incident context in parallel from your existing tooling, and produces a structured diagnosis — with confidence scoring, evidence citations against the supplied context, and suggested remediations. Single-shot, schema-validated, deterministic. Learns from resolutions via a pgvector incident memory.
+**AI on-call copilot.** Sentinel ingests production alerts (Sentry, PagerDuty, Datadog, generic webhooks), assembles incident context in parallel from your existing tooling, and produces a structured diagnosis — with confidence scoring, evidence citations against the supplied context, and suggested remediations. Single-shot, schema-validated, and run at temperature 0. Learns from resolutions via a pgvector incident memory.
 
 Public engineering portfolio. Held to a production bar — every external call has a timeout and a circuit breaker, every LLM response is schema-validated, every evidence citation is verified, and the eval harness blocks regressions in CI.
 
