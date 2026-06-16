@@ -126,12 +126,28 @@ class WebhookHandler:
             payload_hash = sha256(body).hexdigest()
 
             # 7. Persist + outbox in one tx.
-            result = await self._repo.ingest(
-                alert,
-                fingerprint=fp,
-                outbox_topic=self._outbox_topic,
-                payload_hash=payload_hash,
-            )
+            #
+            # The idempotency key is already marked (step 4). If persistence fails
+            # here we MUST clear that key, else the sender's byte-identical retry
+            # dedups into silent permanent loss — the exact failure ADR 0001 forbids.
+            # Compensate, then return a retryable 503 so the sender re-delivers.
+            try:
+                result = await self._repo.ingest(
+                    alert,
+                    fingerprint=fp,
+                    outbox_topic=self._outbox_topic,
+                    payload_hash=payload_hash,
+                )
+            except Exception:
+                log.exception("ingest_failed_after_idempotency_mark")
+                try:
+                    await self._idempotency.unmark(source, body)
+                except Exception:
+                    # Best-effort: the key falls back to its 24h TTL. Still return
+                    # 503 so the sender retries rather than treating this as done.
+                    log.exception("idempotency_unmark_failed")
+                outcome = HandlerOutcome.INFRA_UNAVAILABLE
+                return HandlerResult(outcome=outcome, reason="persist_failed")
             incident_id = result.incident_id
             outcome = (
                 HandlerOutcome.RECURRED

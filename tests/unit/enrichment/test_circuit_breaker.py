@@ -131,6 +131,117 @@ async def test_cancellation_does_not_count_as_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_half_open_single_flights_concurrent_probes() -> None:
+    """In half_open, exactly ONE caller probes the unhealthy dependency; callers
+    arriving while the probe is in flight short-circuit with CircuitOpenError
+    instead of all hammering the dependency (issue #65)."""
+    clock = _Clock()
+    cb = CircuitBreaker("x", threshold=1, window_s=60.0, cooldown_s=30.0, time_fn=clock)
+
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        await cb.call(boom)  # threshold=1 → opens immediately
+    assert cb.state == "open"
+    clock.advance(31.0)  # cooldown elapsed → next caller may probe
+
+    probe_in_flight = asyncio.Event()
+    release = asyncio.Event()
+    probe_calls = 0
+
+    async def slow_probe() -> str:
+        nonlocal probe_calls
+        probe_calls += 1
+        probe_in_flight.set()
+        await release.wait()
+        return "ok"
+
+    async def must_not_run() -> str:  # pragma: no cover - asserts it never runs
+        raise AssertionError("concurrent caller should have been short-circuited")
+
+    probe_task = asyncio.create_task(cb.call(slow_probe))
+    await asyncio.wait_for(probe_in_flight.wait(), timeout=1.0)
+
+    # While the single probe is in flight, concurrent callers must be rejected.
+    results = await asyncio.gather(
+        cb.call(must_not_run), cb.call(must_not_run), return_exceptions=True
+    )
+    assert all(isinstance(r, CircuitOpenError) for r in results), results
+
+    release.set()
+    assert await probe_task == "ok"
+    assert probe_calls == 1
+    assert cb.state == "closed"  # type: ignore[comparison-overlap]
+
+
+@pytest.mark.asyncio
+async def test_half_open_probe_reopens_then_allows_next_probe_after_cooldown() -> None:
+    """Guards the *failure-path* flag release: a failed half-open probe re-opens
+    the breaker AND clears the in-flight flag, so a fresh probe is admitted after
+    the next cooldown. (Drop the flag-clear from the failure branch and the final
+    call short-circuits with CircuitOpenError instead of probing.)"""
+    clock = _Clock()
+    cb = CircuitBreaker("x", threshold=1, window_s=60.0, cooldown_s=30.0, time_fn=clock)
+
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    async def ok() -> int:
+        return 1
+
+    with pytest.raises(RuntimeError):
+        await cb.call(boom)
+    clock.advance(31.0)
+    # Single-flight probe fails → reopen (and in-flight flag must be released).
+    with pytest.raises(RuntimeError):
+        await cb.call(boom)
+    assert cb.state == "open"
+    # Next cooldown → a fresh probe is allowed (proves the flag was cleared).
+    clock.advance(31.0)
+    assert await cb.call(ok) == 1
+    assert cb.state == "closed"  # type: ignore[comparison-overlap]
+
+
+@pytest.mark.asyncio
+async def test_half_open_cancelled_probe_releases_slot() -> None:
+    """Guards the cancellation-path flag release: if the single half-open probe
+    is cancelled (e.g. the caller's task is torn down), the in-flight slot must be
+    freed so a later caller can probe — never wedged half-open forever (issue #65).
+    """
+    clock = _Clock()
+    cb = CircuitBreaker("x", threshold=1, window_s=60.0, cooldown_s=30.0, time_fn=clock)
+
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    async def ok() -> int:
+        return 1
+
+    with pytest.raises(RuntimeError):
+        await cb.call(boom)
+    clock.advance(31.0)
+
+    probe_in_flight = asyncio.Event()
+
+    async def blocking_probe() -> None:
+        probe_in_flight.set()
+        await asyncio.Event().wait()  # block until cancelled
+
+    probe_task = asyncio.create_task(cb.call(blocking_probe))
+    await asyncio.wait_for(probe_in_flight.wait(), timeout=1.0)
+    probe_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await probe_task
+
+    # State is still half_open (cancellation isn't a failure); only the flag gates
+    # the next caller. If it leaked True this would raise CircuitOpenError.
+    assert cb.state == "half_open"
+    assert await cb.call(ok) == 1
+    assert cb.state == "closed"  # type: ignore[comparison-overlap]
+
+
+@pytest.mark.asyncio
 async def test_state_change_callback_fires_on_transitions() -> None:
     clock = _Clock()
     events: list[tuple[str, str]] = []
